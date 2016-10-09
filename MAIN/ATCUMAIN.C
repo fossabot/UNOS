@@ -1,0 +1,685 @@
+/*
+----------------------------------------------------------------
+Main module:	atcumain.c
+
+contains main ()  function
+
+Initialise UNOS and create tasks
+
+written	: Len Sciacca       1994
+
+----------------------------------------------------------------
+*/
+
+/*
+----------------------------------------------------------------
+HISTORY
+	Len Sciacca installed the unimel code towards the end of 1994
+	Main bug in system to date:
+		Program sometimes crashes on exit
+		Program sometimes crashes during execution
+
+
+8-Sep 1995	STo      Started major cleanup of unimel code
+						Typed in info at start of file
+						Cleaned up the include files
+						Checked for global variables:
+							ptr_to_memory_pool, All task names,
+----------------------------------------------------------------
+*/
+
+#include <stdio.h>
+#include <dos.h>
+#include <conio.h>
+#include <alloc.h>
+#include <stdlib.h>
+#include <float.h>      /* Imports _clear87() to clear 8087 status word */
+
+#include <general.h>
+#include <unos.h>
+#include <screen.h>
+#include "unosdef.h"
+
+#include "kbddrv.h"		// import fvdConnectToKeyboard ()
+#include "comprot.h"	// import init_server_protocol_task()
+						// import server_protocol_task()
+
+#include "decoder.h"	// import init_decoder_task
+						// import decoder_task
+
+// Imports required to init serial drivers
+//#include <serdef.h>
+
+// contains prototypes for PC dependent routines
+#include <hwpc.h>
+#include <err_ex2.h>
+#include <seq.h>
+#include <nvramext.h>
+#include "keyboard.h"
+#include "main_ext.h"
+//#include <circbuf.h>
+#include "serinit.h"	// Import fintSerialChannelInitialise ()
+//#include <receiver.h>   /* FROM Receiver IMPORT BeaconSimulatorTask */
+//#include <beacon.h>     /* FROM Beacon IMPORT BeaconTask, ShowTime 	*/
+#include <cmclock.h>    /* Import init clock routines 				*/
+#include <wdog.h>       /* Import init_watch_dog ( ) 				*/
+//#include <hwio.h>   /* Import assign_operational_mode() 		*/
+//#include <antsimex.h>   /* Import init_antenna_io () 				*/
+#include "plc.h"
+#include "plcext.h"
+#include "slp.h"		// Import slp_task, init_slp_task
+
+#define FALSE 0
+#define TRUE  1
+
+#define SERIAL_COMMS 1	/* Define=1 to include the serial communications */
+#define PLC_COMMS 1	/* Define=1 to include the plc serial communications */
+
+/* Task Names */
+
+char chSequencerTaskName[] 		= "Sequencer Task";
+char ScreenTaskName []			= "Screen Task";
+char keyboard_task_name []		= "Keyboard Task"; // Scan Task
+char kbd_parser_name[]			= "Keyboard Parser Task";
+//char chLCMUParserTaskName[] 	= "LCMU Parser Task";
+//char chRCMUParserTaskName[] 	= "RCMU Parser Task";
+//char chRX0ProtocolTaskName[] 	= "RX0 Protocol Task";
+char chRX1ProtocolTaskName[] 	= "RX1 Protocol Task";
+//char chRX2ProtocolTaskName[] 	= "RX2 Protocol Task";
+//char chRX3ProtocolTaskName[] 	= "RX3 Protocol Task";
+//char chOrbitTrackTaskName[] 	= "Orbit Track Task";
+//char chBeaconSimulatorTaskName[]= "Beacon Simulator Task";
+char chPLCTaskName[] 		= "PLC Task";
+char null_task_name[]			= "Null Task";
+char ch_0_rx[]					= "Channel 0 Rx";
+char ch_0_tx[]					= "Channel 0 Tx";
+char ch_1_rx[]					= "Channel 1 Rx";
+char ch_1_tx[]					= "Channel 1 Tx";
+char ch_2_rx[]					= "Channel 2 Rx";
+char ch_2_tx[]					= "Channel 2 Tx";
+char ch_3_rx[]					= "Channel 3 Rx";
+char ch_3_tx[]					= "Channel 3 Tx";
+char chServerProtocolTaskName [] = "ServerProtTask";
+char chSLPTaskName []				= "SLP Task";
+char chDecoderTaskName []			= "DecoderTask";
+char name_clock []				="Rclock";
+
+static FILE *fp;       /* File pointer for data-logging file   */
+static FILE *f_ptr;		 /* File pointer for graphics */
+
+extern int screen_blanking_delay;
+
+/* ATCU Tasks not imported in header files. */
+extern void rx_0_protocol_task ( void *);
+extern void rx_1_protocol_task ( void *);
+//extern void rx_2_protocol_task ( void *);
+//extern void rx_3_protocol_task ( void *);
+//extern void LCMUParserTask ( void *);
+//extern void RCMUParserTask ( void *);
+extern void sequencer_task ( void *);
+extern void screen_task ( void * );
+extern void kbd_task (void *);
+
+extern void null_task ( void * );
+extern void time_task ( void * );
+extern void init_time_task ( void );
+
+// some local prototypes
+static void software_initialise ( void );
+static void hardware_initialise ( void );
+void main ( int argc, char *argv[] );
+static void fvdRestore (void);
+
+// some important flags
+static int simulator_speed;
+static int simulation;
+static int nvram_sim;
+
+// Memory Pool pointer
+char* ptr_to_memory_pool = NULL;
+
+/* Define directvideo = 0 so we do not use C routines for screen access.
+	The C routines (probably) check the video adapter for data -
+	they hang if no adapter is present (the normal condition for
+	the ATCU). Thus we will have to live with the interrupt overhead
+	introduced by use of the BIOS routines.
+*/
+extern int directvideo = 1;
+
+/*------ define the size of the stack reserved by Turbo C ------*/
+extern unsigned _stklen = 0x9000;
+
+/*------ Default Task stack specifications ------*/
+#define TASK_VERY_SMALL_STACK_SIZE  0x400
+#define TASK_SMALL_STACK_SIZE  0x1800
+#define TASK_LARGE_STACK_SIZE  0x4800
+
+/*Define the maximum possible number of tasks in the system.
+
+	/* Note that task numbers start from zero. Also note that there is
+	always three tasks in the system - the null task(UNOS), screen and
+	keyboard tasks. The variable number_of_user_tasks below is the maximum
+	number of USER tasks, and therefore excludes the above-mentioned tasks.
+	*/
+#define MAX_NUM_OF_USER_TASKS 20
+#define MAX_NUM_OF_TASKS ( MAX_NUM_OF_USER_TASKS + 1 )
+
+
+
+// Store some important vectors
+static void interrupt (*pfvdOldKernelPositionVector)(...);
+static void interrupt (*pfvdOldTickInterruptRoutine)(...);
+
+/*
+*******************************************************************************
+hardware_initialise
+
+ The function of this routine is to initialise all the hardware related
+ items in the system.
+
+*******************************************************************************
+*/
+
+static void hardware_initialise ( void ) {
+	int inStatus;
+
+	// First thing to do is initialise the watchdog timer board.
+	cprintf ("Watch Dog Timer...\n\r");
+	init_watch_dog ( );
+
+	disable ( );
+
+#if ( PLC_COMMS == 1 )
+	cprintf ("Serial Drivers...\n\r");
+	inStatus = fintSerialChannelInitialise ();
+	if( inStatus == FALSE )
+		cprintf("Problem setting up serial channels\n\r");
+#endif
+
+	// Set up CMOS Clock
+	cprintf ("CMOS clock...\n\r");
+	InitialiseClock();
+
+	disable();
+
+} // end of hardware_initialise
+
+
+/*
+*******************************************************************************
+software_initialise
+
+The function of this procedure is to initialise all the software entities in
+the operating system.
+
+*******************************************************************************
+*/
+void software_initialise ( ) {
+
+	int inI;
+
+	/*---- Open a file for diagnostics only */
+	/* File is overwritten everytime atcu starts up */
+		cprintf("DATA LOG FILE OPEN==========================================\n\r");
+		fp = fopen ( "data.dat", "w" );
+		f_ptr = fopen("gdraw.log","w");
+
+		setbuf(fp,(char *)NULL);
+		delay(2000);
+		if (fp == NULL)
+		{
+		 long i;
+			cprintf(" Problem in opening file for data logging \n");
+				perror("\nblah");
+				delay(5000);
+			exit(1);
+		}
+
+	/* set up all the OS main data structures */
+	if ( !setup_os_data_structures ( KERNEL_ENTRY, ENTER_KERNEL_VALUE,
+			NUM_OF_PRIORITIES, MAX_NUM_SEMAPHORES, MAX_NUM_OF_TASKS,
+			ptr_to_memory_pool, MEMORY_POOL_SIZE ) ) {
+		cprintf ("\n Problem setting up the OS data structures\n" );
+		exit (EXIT_FAILURE);
+	} /* if */
+
+
+	/* now create the timers */
+	for (inI = 0; inI < MAX_NUM_TIMERS; inI++) {
+			if (create_timer () == NULL) {
+			cprintf ("\n\rProblem creating timers");
+						exit (EXIT_FAILURE);
+				} /* if */
+	} /* for */
+
+
+	/*
+	initialise the interrupt vector for the kernel entry
+	*/
+
+	disable ( );
+
+	/*
+	set up the kernel entry interrupt
+	*/
+
+	pfvdOldKernelPositionVector = getvect (KERNEL_ENTRY);
+	SetVector (KERNEL_ENTRY, kernel);
+
+	/*
+	now set up the tick routine interrupt vector
+	*/
+	pfvdOldTickInterruptRoutine = getvect( 8 );
+	//SetVector (8, tick);
+	set_new_tick ( 30, tick );
+
+	/* now set up an exit routine */
+
+	atexit (fvdRestore);
+
+	// Initialise the error handler first, so that all other software
+	// initialisations can nominate sticky errors.
+	cprintf ("Error Handler...\n\r");
+	if ( !error_handler_init() )
+		{
+		printf ("\n\r Problem setting up Error Handler.\n\r" );
+		exit ( 1 );
+		}
+
+	// Some ATCU module/task initialisation routines.
+	cprintf ("NVRAM...\n\r");
+	if ( !nvram_init( NVRAM_INIT_MODE ) )
+		{
+		cprintf ("ERROR - Problem setting up NVRAM Controller.\n\r" );
+		exit ( 1 );
+		}
+
+	// Connect to Keyboard parser Task
+	fvdConnectToKeyboard (kbd_parser_name);
+
+} // end of software_initialise
+
+/*
+*******************************************************************************
+get_simulation ()
+
+Use simulation or REAL WORLD.
+
+********************************************************************************
+*/
+int get_simulation ( void ) {
+	int temp;
+
+	disable();
+	temp = simulation;
+	enable();
+
+	return temp;
+
+} // end of get simulation
+
+/*
+*******************************************************************************
+get_fileptr ()
+
+Return the file pointer to the data-logging file
+********************************************************************************
+*/
+FILE *get_fileptr ( void ) {
+	FILE *temp;
+
+	disable();
+	temp = fp;
+	enable();
+
+	return temp;
+
+} // end of get fileptr
+FILE *get_graphptr ( void ) {
+	FILE *temp;
+
+	disable();
+	temp = f_ptr;
+	enable();
+
+	return temp;
+
+} // end of get fileptr
+
+/*
+********************************************************************************
+simulator_speed ()
+
+Antenna simulator slewing speed switch, defined by command-line input
+	to main():- 0 = real time, 1 = 5 * real time.
+********************************************************************************
+*/
+int get_simulator_speed ( void ) {
+	int temp;
+
+	disable();
+	temp = simulator_speed;
+	enable();
+
+	return temp;
+
+} // end of simulator speed
+
+/*
+********************************************************************************
+nvram_sim ()
+
+NVRAM switch - defined by 2nd command-line input to main():-
+		0 for computer with NVRAM, 1 for those without.
+********************************************************************************
+*/
+int get_nvram_sim ( void ) {
+	int temp;
+
+	disable();
+	temp = nvram_sim;
+	enable();
+
+	return temp;
+
+} // end of get_nvram_sim
+
+
+/*
+********************************************************************************
+fvdRestore ()
+
+ This is the exit fucntion which is called to restore the interrupts related
+ to UNOS operation - namely the kernel entry interrupt and the tick interrupt.
+ In addition the screen is reset to a standard screen.
+
+ Parameters	:	none
+
+ Returns		:	nothing
+
+********************************************************************************
+*/
+
+void fvdRestore (void) {
+
+	/* restore the timer back to its original mode */
+	disable ();
+	outportb (I8254_CTRL_REG, I8254_SQUARE_WAVE_MODE_COUNTER_0);
+	outportb (I8254_COUNTER_0, 0xff);
+	outportb (I8254_COUNTER_0, 0xff);
+
+	/* Now restore the interrupt vector back */
+	SetVector (KERNEL_ENTRY, pfvdOldKernelPositionVector);
+	SetVector (8, pfvdOldTickInterruptRoutine);
+
+	clrscr ();
+	_setcursortype(_NORMALCURSOR);
+
+} // end of fvdRestore
+
+
+
+
+/*
+****************************************************************************
+free_memory
+
+Routine to deallocate memory on exiting from the program.
+
+Called at system cleanup.
+
+****************************************************************************
+*/
+void free_memory ( ) {
+
+	farfree ( ptr_to_memory_pool );
+
+} // end of free_memory
+
+
+/************************************************************************/
+/*                                                                      */
+/*                              MAIN PROGRAM                            */
+/*                                                                      */
+/************************************************************************/
+void main ( int argc, char *argv[] ) {
+
+	ptr_to_memory_pool = (char*)farmalloc ( MEMORY_POOL_SIZE );
+
+	// Advise the user. Don't let the user do nothing!
+	if( ( ( argc > 1 ) &&  ( *argv[1] == '?' ) ) || ( argc == 1 ) )
+		{
+		printf("\n Two command-line parameters are available.\n\n"
+		"1. Parameter 1 selects the antenna simulator and sets its \n"
+		"     maximum azimuth slewing speed:-\n"
+		" `n' = no simulator - run with the real world (default);\n"
+		" `r' = real-time simulator, and\n"
+		" `f' = 5 * real-time simulator ( in Az slewing only).\n\n"
+		"2. Parameter 2 allows this program to run when no NVRAM card is"
+		" present.\n"
+		"	r - uses NVRAM card (default);\n"
+		"	s - does not need NVRAM card.\n\n");
+
+		exit(0);
+		} // if
+
+	// Select the antenna simulator and set its speed according to
+	// the 1st command line input -
+	// `n' = no simulator - run with the real world (default);
+	// `r' = real-time simulator, and
+	// `f' = 5 * real-time simulator ( in Az slewing only).
+	if( argc > 1 )
+		{
+		if( *argv[1] == 'n' )
+			simulation = 0;
+		else
+			simulation = 1;
+		}
+		else
+			simulation = 0;
+
+	// Set the NVRAM simulation on or off, according to the
+	// 2nd command-line input:-
+	// `r' = real NVRAM exists, (default) and
+	// `s' = no NVRAM exists.
+	if(argc > 2 && *argv[2] == 's')
+		nvram_sim = 1;
+	else
+		nvram_sim = 0;
+
+	nvram_sim =1;
+	simulator_speed = 0;
+
+	// Give DOS time to stop the floppy disk drive motor.
+	// delay(2000);
+
+	// Initialise all the software and hardware in the system.
+	clrscr();
+
+	if (simulation)
+		cprintf(" \t \t ****** Simulation Mode ******\n\r");
+		
+	cprintf("SOFTWARE INITIALISATION=====================================\n\r");
+	software_initialise();
+
+	cprintf("HARDWARE INITIALISATION=====================================\n\r");
+	hardware_initialise();
+	delay(2000);
+
+	// Now create the user tasks
+	cprintf("TASK GENERATION=============================================\n\r");
+
+	cprintf("Sequencer\n\r");
+	create_task ( chSequencerTaskName,
+					PRIORITY_1,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_SMALL_STACK_SIZE,
+					SEQUENCER_TASK_Q_SIZE,
+					SEQUENCER_MESS_SIZE,
+					NULL,
+					sequencer_task,
+					NULL );
+
+	cprintf("Keyboard Scan Task\n\r");
+	create_task ( 	keyboard_task_name,
+					PRIORITY_2,   /* changed from PRIORITY_1 by rjlov  */
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_STACK_SIZE,
+					MESS_Q_SIZE_KEYBD_TASK,
+					MESS_SIZE_KEYBD_TASK,
+					fvdInitScanCodeTranslatorTask,
+					fvdScanCodeTranslatorTask,
+					NULL );
+
+	cprintf ("Keyboard Parser\n\r");
+	create_task (kbd_parser_name,
+					PRIORITY_4,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_STACK_SIZE,
+					KEYBOARD_PARSER_MESS_Q_SIZE,
+					KEYBOARD_PARSER_MESS_SIZE,
+					NULL,
+					kbd_task,
+					NULL );
+
+	/* unmask the keyboard interrupt */
+	outportb (0x0021, inportb(0x0021) & 0xfd);
+
+	/* Set up the screen task */
+	cprintf("Screen\n\r");
+	create_task ( ScreenTaskName,
+				PRIORITY_6,
+				0,
+				TASK_RUNNABLE,
+				PRIORITY_Q_TYPE,
+				0,
+				0x2000,
+				SCREEN_TASK_Q_SIZE,
+				SCREEN_TASK_MESS_SIZE,
+				NULL,
+				screen_task,
+				NULL );
+
+#if ( SERIAL_COMMS  == 1 )     /* SERIAL_COMMS is defined at top of file */
+
+	cprintf("PLC\n\r");
+	create_task ( chPLCTaskName,
+					PRIORITY_2,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_SMALL_STACK_SIZE,
+					LCMU_PARSER_MESS_Q_SIZE,
+					LCMU_PARSER_MESS_SIZE,
+					NULL,
+					plc_task,
+					NULL );
+
+		cprintf("Server Protocol\n\r");
+		create_task ( chServerProtocolTaskName,
+					PRIORITY_2,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_SMALL_STACK_SIZE,
+					LCMU_PARSER_MESS_Q_SIZE,
+					LCMU_PARSER_MESS_SIZE,
+					init_server_protocol_task,
+					server_protocol_task,
+					NULL );
+
+		cprintf("Decoder\n\r");
+		create_task ( chDecoderTaskName,
+					PRIORITY_2,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_SMALL_STACK_SIZE,
+					DECODER_MESS_Q_SIZE,
+					DECODER_MESS_SIZE,
+					init_decoder_task,
+					decoder_task,
+					NULL );
+
+		cprintf("SLP Task\n\r");
+		create_task ( chSLPTaskName,
+					PRIORITY_2,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_SMALL_STACK_SIZE,
+					SLP_MESS_Q_SIZE,
+					SLP_MESS_SIZE,
+					init_slp_task,
+					slp_task,
+					NULL );
+#endif
+
+	cprintf("Channel 1 Protocol\n\r");
+	create_task ( chRX1ProtocolTaskName,
+					PRIORITY_2,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_SMALL_STACK_SIZE,
+					RX_1_PROTOCOL_MESS_Q_SIZE,
+					RX_1_PROTOCOL_MESS_SIZE,
+					NULL,
+					rx_1_protocol_task,
+					NULL );
+
+	cprintf("Creating R Clock Task...\n\r");
+	create_task (name_clock,
+					PRIORITY_4,
+					0,
+					TASK_RUNNABLE,
+					PRIORITY_Q_TYPE,
+					0,
+					TASK_SMALL_STACK_SIZE,
+					2,
+					2,
+					init_time_task,
+					time_task,
+					NULL);
+
+	cprintf("STARTING  UNOS==============================================\n\r");
+	// Null task is created here
+	create_task (	null_task_name,
+					NULL_PRIORITY,
+					0,
+					TASK_RUNNABLE,
+					DONOT_Q_TYPE,
+					0,
+					0x400,
+					0,
+					0,
+					NULL,
+					null_task,
+					NULL );
+
+	delay ( 1000 );
+	cprintf("1 second\n");
+	delay (1000);
+	cprintf("2 seconds\n");
+	delay(1000);
+
+	start_tasks ( null_task );
+
+
+} // end of main
+
+

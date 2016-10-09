@@ -1,0 +1,12 @@
+/*
+********************************************************************************
+							iohw.h
+
+********************************************************************************
+*/
+
+void dac_out ( int ch, double voltage, double min, double max );
+
+void OutputAzVolts_temp ( double volts );
+
+void OutputElVolts_temp ( double volts );

@@ -1,0 +1,310 @@
+
+/**************************************************************************/
+/*                                                                        */
+/*                                                                        */
+/*                        SEQUENCER KEYBOARD MODULE                       */
+/*                                                                        */
+/*                                     by                                 */
+/*                                                                        */
+/*                                 L. J. Sciacca                          */
+/*         Department of Electrical Engineering and Computer Science      */
+/*                            University of Newcastle					  */
+/*									Austraila                             */
+/*                                                                        */
+/*                         ( Copyright 91 )                               */
+/*                                                                        */
+/*                                                                        */
+/**************************************************************************/
+
+/*
+MODULE DESCRIPTION
+------------------
+
+	Routines to be called from the keyboard task (kbtask.c). This way static 
+variables need not clutter the kbtask module and users may change their own
+kb entry routine without interfearing with others.
+
+	Called within kbtask when the ^P selection has selected the sequencer
+page.
+
+*/
+
+#include <stdio.h>
+#include <conio.h>
+#include <dos.h>
+#include <math.h>
+
+#include "unos.h"
+
+#include "general.h"
+
+#include "kbtask.h"
+
+#include "err_nums.h"
+
+#include "seq.h"
+
+#include "seqext.h"
+#include "posext.h"
+#include "scrext.h"
+#include "seqscr.h"
+#include "nvramext.h" // Import select_new_beacon()
+
+/*---- For Sequencer Display, whether model or atcu screen */
+static unsigned int command_destination = 0;
+
+
+/* Structures for model, atcu and PC keyboard command parser */
+static cp_data_struct cp_data;
+static atcu_struct atcu;
+
+static double az_pos = 30.0;
+
+/*
+****************************************************************************
+decode_atcu_key
+
+	Routine to decode the keys meant for the ATCU module.
+
+Parameters:
+	key_pressed - key received from the keyboard
+
+****************************************************************************
+*/
+void decode_atcu_key ( unsigned char key_pressed ) {
+
+	double increment;
+
+	set_latest_error ( 0 );
+
+	cp_data = return_cp_data ( );
+
+	atcu = return_atcu ( );
+	increment = get_increment ( );
+
+	if ( command_destination == ATCU_DEST )
+	/* Do a simple switch statement to send commands to sequencer */
+	switch ( key_pressed ) {
+
+		case CONTROL_A:			/* Adjust azimuth to left ^A */
+			switch ( cp_data.mode ) {
+				case RATE_MODE:
+					cp_data.az_dem_rate -= increment;
+					break;
+
+				case POSITION_MODE:
+					az_pos = fmod ( az_pos - increment, 360.0 );
+					if ( az_pos < 0 )
+						cp_data.az_cmd = az_pos + 360;
+					else
+						cp_data.az_cmd = az_pos;
+
+					break;
+
+				case STARTRACK_MODE:
+					cp_data.az_ramp_rate -= increment;
+					break;
+
+				default:
+					break;
+
+				} /* switch */
+
+			set_cp_data ( &cp_data );
+
+			break;
+
+		case CONTROL_B:			/* Change Beacon Number */
+
+			break;
+
+		case CONTROL_G:
+			break;
+
+		case CONTROL_N:			/* Clear NVRAM Error*/
+			ClearNVRAMError ( );
+			break;
+
+
+		case CONTROL_S:		/* Adjust azimuth to the right ^S */
+			switch ( cp_data.mode ) {
+				case RATE_MODE:
+					cp_data.az_dem_rate += increment;
+					break;
+
+				case POSITION_MODE:
+					az_pos += increment;
+					if ( az_pos < 0 )
+						cp_data.az_cmd = az_pos + 360;
+					else
+						cp_data.az_cmd = az_pos;
+					break;
+
+				case STARTRACK_MODE:
+					cp_data.az_ramp_rate += increment;
+					break;
+
+				default:
+					break;
+
+				} /* switch */
+
+			set_cp_data ( &cp_data );
+			break;
+
+		case CONTROL_W:
+			/* Adjust Elevation Up ^W */
+			switch ( cp_data.mode ) {
+				case RATE_MODE:
+					cp_data.el_dem_rate += increment;
+					break;
+
+				case POSITION_MODE:
+					cp_data.el_cmd += increment;
+					break;
+
+				case STARTRACK_MODE:
+					cp_data.el_ramp_rate += increment;
+					break;
+
+				default:
+					break;
+
+				} /* switch */
+
+			set_cp_data ( &cp_data );
+			break;
+
+		case CONTROL_Z:
+			/* Adjust Elevation Down ^Z */
+			switch ( cp_data.mode ) {
+				case RATE_MODE:
+					cp_data.el_dem_rate -= increment;
+					break;
+
+				case POSITION_MODE:
+					cp_data.el_cmd -= increment;
+					break;
+
+				case STARTRACK_MODE:
+					cp_data.el_ramp_rate -= increment;
+					break;
+
+				default:
+					break;
+
+				} /* swtich */
+
+			set_cp_data ( &cp_data );
+			break;
+
+
+		/* Change modes */
+		case 'c':
+		case 'C':
+
+			if ( ( atcu.state == STANDBY ) ||
+					( atcu.state == HOLDING ) ||
+					( atcu.state == OFF_STATE )
+					) {
+
+				cp_data.mode++;
+
+				if ( cp_data.mode > TOTAL_MODES )
+					cp_data.mode = 0;
+
+				cp_data.cmd = IDLE_CMD;
+				if ( cp_data.mode == RATE_MODE ) {
+					cp_data.az_dem_rate = 0.0;
+					cp_data.el_dem_rate = 0.0;
+					}
+
+				set_cp_data ( &cp_data );
+
+				}
+			else
+				process_error ( BAD_KEY_ENTRY );
+
+			break;
+
+						/* DRIVE ON */
+		case 'd':
+		case 'D':
+			cp_data.cmd = DRIVE_START_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+						/* GO */
+		case 'g':
+		case 'G':
+			cp_data.cmd = GO_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+						/* HOLD */
+		case 'h':
+		case 'H':
+			cp_data.cmd = HOLD_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+						/* Lights On */
+		case 'L':
+			cp_data.cmd = LIGHTS_ON_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+						/* Lights Off */
+		case 'l':
+			cp_data.cmd = LIGHTS_OFF_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+		case 'm':
+		case 'M':
+			break;
+
+						/* DRIVE OFF */
+		case 'o':
+		case 'O':
+			cp_data.cmd = DRIVE_STOP_CMD;
+			set_cp_data ( &cp_data );
+			break;
+						/* Power On i.e. Close C1 and C2 contactors */
+		case 'p':
+			cp_data.cmd = POWER_OFF_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+		case 'P':
+			cp_data.cmd = POWER_ON_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+						/* STOW */
+		case 's':
+		case 'S':
+			cp_data.cmd = STOW_CMD;
+			set_cp_data ( &cp_data );
+			break;
+
+		case 'w':
+		case 'W':
+			cp_data.wrap = cp_data.wrap++;
+			if ( cp_data.wrap > 2 )
+				cp_data.wrap = 0;
+
+			set_cp_data ( &cp_data );
+			break;
+
+		default:
+			process_error ( BAD_KEY_ENTRY );
+			break;
+
+		} /* switch */
+
+} /* end of decode_atcu_key */
+
+/*------------------------ End of Sequencer keyboard Entry routines ----*/
+
+

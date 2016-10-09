@@ -1,0 +1,25 @@
+здддддддддддддддддддддддддддддддддддд©
+Ё    ACU Functional Information      Ё   CONTROL STATUS: PID CONTROLLER
+Ё    Azimuth          Elevation      Ё
+цдддддддддддддддддддддддддддддддддддд╢
+Ё Cmd  :    0.000   Cmd  :   3.000 Ь Ё      Signal level(V):       0.000
+Ё Msd  :    0.000   Msd  :   0.000 Ь Ё      Scanning mode :     OFF
+Ё Err  :    0.000   Err  :   3.000 Ь Ё      Data logging  :     OFF
+Ё Rate :    0.000   Rate :   0.000 V Ё
+Ё State: Off        State:Off        Ё зддддддддддддддддддддддддддддддддддддд©
+Ё Speed:    0.000          0.000   Ь/s Ё Tacho (rev/sec):       0.000        Ё
+Ё ACU State   :   Off                Ё Ё                                     Ё
+Ё Mode         :  Position - Az/El   Ё Ё                                     Ё
+Ё Last Command :  Power Off          Ё Ё 0                                 20Ё
+Ё Up Time      :      0.0161         Ё юддддддддддддддддддддддддддддддддддддды
+Ё WRAP :     CW   Missed: 0          Ё
+Ё Error :                            Ё      kbd psr:  0
+Ё CMOS Time 9:2:45 9/10/95           Ё      plc task: 176
+юдддддддддддддддддддддддддддддддддддды
+  h = hold, s = stow, d = drive_On, o = Drive_off, g = Go,c  = Change Mode
+  Az: ^A CCW,^S CW Ё El: ^W Up,^Z  Dwn | Beacon:^B
+  AZ/EL Cmd >    20.000 Ь      30.000 Ь     Incr: ^C Dwn, ^R Up   Inc    1.0000
+дддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддддд
+F1-STATUS  F2-ORBIT   F3-PLC     F4-COMMS   F5-TUNE    F6-IO      F7-CALIBR  F8-
+GRAPH
+

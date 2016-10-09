@@ -1,0 +1,230 @@
+
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 0                 STETRACK IN
+		  received power: 0.904 azimuth tracking error: -0.100       AZIMUTH
+										elevation tracking error: 0.116
+ kalman state: 0                                                  AZ=AZ-0.2
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.578 azimuth tracking error: -0.300  Power  decreases
+										elevation tracking error: 0.116
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 1                 STEPTRACK IN
+		  received power: 0.578 azimuth tracking error: -0.300       ELEVATION
+										elevation tracking error: 0.116
+ kalman state: 0                                                  EL=EL-0.2
+		  update_model_state: 0 steptrack state: 1
+		  received power: 0.604 azimuth tracking error: -0.300   Power increases
+										elevation tracking error: -0.084
+ kalman state: 0                                                   EL=EL-0.2
+		  update_model_state: 0 steptrack state: 1
+		  received power: 0.303 azimuth tracking error: -0.300   Power decreases
+										elevation tracking error: -0.284
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 2                 STETRACK IN
+		  received power: 0.303 azimuth tracking error: -0.300       AZIMUTH
+										elevation tracking error: -0.284
+ kalman state: 0                                                  AZ=AZ+0.2
+		  update_model_state: 0 steptrack state: 2
+		  received power: 0.630 azimuth tracking error: -0.100    Power increases
+										elevation tracking error: -0.284
+ kalman state: 0                                                  AZ=AZ+0.2
+		  update_model_state: 0 steptrack state: 2
+		  received power: 0.629 azimuth tracking error: 0.100     Power decreases
+										elevation tracking error: -0.284
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 3                  STEPTRACK IN
+		  received power: 0.630 azimuth tracking error: 0.100         ELEVATION
+										elevation tracking error: -0.284
+ kalman state: 0                                                   EL=EL+0.2
+		  update_model_state: 0 steptrack state: 3
+		  received power: 0.930 azimuth tracking error: 0.100     Power increases
+										elevation tracking error: -0.084
+ kalman state: 0                                                   EL=EL+0.2
+		  update_model_state: 0 steptrack state: 3
+		  received power: 0.904 azimuth tracking error: 0.100     Power decreases
+										elevation tracking error: 0.116
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 4                 PARABOLA
+		  received power: 0.904 azimuth tracking error: 0.100      FITTING
+										elevation tracking error: 0.116
+ kalman state: 0                                                  AZ=AZ-0.2
+		  update_model_state: 0 steptrack state: 4
+		  received power: 0.904 azimuth tracking error: -0.100
+										elevation tracking error: 0.116
+ kalman state: 0                                                 calculation
+		  update_model_state: 0 steptrack state: 4              of optimun azimuth
+		  received power: 0.945 azimuth tracking error: 0.000
+										elevation tracking error: 0.116
+ kalman state: 0                                                  EL=EL-0.2
+		  update_model_state: 0 steptrack state: 4
+		  received power: 0.971 azimuth tracking error: 0.000
+										elevation tracking error: -0.084
+ kalman state: 0                                                 calculation
+		  update_model_state: 0 steptrack state: 5            of optimun elevation
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+
+
+
+ kalman state: 5                                               Test if it is
+		  update_model_state: 0 steptrack state: 0            the first steptrack
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 1
+		  update_model_state: 0 steptrack state: 0             Initialisation of
+		  received power: 0.997 azimuth tracking error: 0.000     the Kalman
+										elevation tracking error: -0.025    filter
+ kalman state: 2
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 2
+		  update_model_state: 1 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 2
+		  update_model_state: 2 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 2
+		  update_model_state: 3 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 2
+		  update_model_state: 4 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 3
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+									elevation tracking error: -0.025
+ kalman state: 4
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+									elevation tracking error: -0.025
+ kalman state: 6
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 3
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 4
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 6
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+ kalman state: 3
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.997 azimuth tracking error: 0.000
+										elevation tracking error: -0.025
+
+
+
+
+
+
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.992 azimuth tracking error: 0.019
+										elevation tracking error: 0.040
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.860 azimuth tracking error: -0.181
+										elevation tracking error: 0.040
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 1
+		  received power: 0.860 azimuth tracking error: -0.181
+										elevation tracking error: 0.040
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 1
+		  received power: 0.763 azimuth tracking error: -0.181
+										elevation tracking error: -0.160
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 2
+		  received power: 0.763 azimuth tracking error: -0.181
+										elevation tracking error: -0.160
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 2
+		  received power: 0.894 azimuth tracking error: 0.019
+										elevation tracking error: -0.160
+ kalman state: 0
+        update_model_state: 0 steptrack state: 2
+		  received power: 0.699 azimuth tracking error: 0.219
+										elevation tracking error: -0.160
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 3
+		  received power: 0.699 azimuth tracking error: 0.219
+										elevation tracking error: -0.160
+ kalman state: 0
+        update_model_state: 0 steptrack state: 3
+		  received power: 0.797 azimuth tracking error: 0.219
+										elevation tracking error: 0.040
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 3
+		  received power: 0.568 azimuth tracking error: 0.219
+										elevation tracking error: 0.240
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 4
+		  received power: 0.568 azimuth tracking error: 0.219
+										elevation tracking error: 0.240
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 4
+		  received power: 0.763 azimuth tracking error: 0.019
+										elevation tracking error: 0.240
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 4
+		  received power: 0.764 azimuth tracking error: 0.000
+										elevation tracking error: 0.240
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 4
+		  received power: 0.993 azimuth tracking error: 0.000
+										elevation tracking error: 0.040
+ kalman state: 0
+		  update_model_state: 0 steptrack state: 5
+		  received power: 1.000 azimuth tracking error: 0.000
+		  elevation tracking error: -0.001
+
+
+
+ kalman state: 5
+		  update_model_state: 0 steptrack state: 0
+		  received power: 1.000 azimuth tracking error: 0.000
+										elevation tracking error: -0.001
+ kalman state: 2
+		  update_model_state: 0 steptrack state: 0
+		  received power: 1.000 azimuth tracking error: 0.000
+										elevation tracking error: -0.001
+ kalman state: 3
+		  update_model_state: 0 steptrack state: 0
+		  received power: 1.000 azimuth tracking error: 0.000
+										elevation tracking error: -0.001
+ kalman state: 4
+		  update_model_state: 0 steptrack state: 0
+		  received power: 1.000 azimuth tracking error: 0.000
+										elevation tracking error: -0.001
+ kalman state: 6
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.998 azimuth tracking error:
+										0.009 elevation tracking error: 0.018
+ kalman state: 3
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.998 azimuth tracking error: 0.009
+										elevation tracking error: 0.018
+ kalman state: 4
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.998 azimuth tracking error: 0.009
+										elevation tracking error: 0.018
+ kalman state: 6
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.998 azimuth tracking error: 0.009
+										elevation tracking error: 0.018
+ kalman state: 3
+		  update_model_state: 0 steptrack state: 0
+		  received power: 0.998 azimuth tracking error: 0.009
+		  								elevation tracking error: 0.018
+

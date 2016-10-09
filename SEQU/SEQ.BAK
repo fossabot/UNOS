@@ -1,0 +1,3365 @@
+/***************************************************************************
+ MODULE 	:- SEQU
+
+ FILE 		:- SEQ.C
+
+ PROGRAMMER :- L Sciacca, ASR (NSW) P/L
+				(Version of sequencer based on port of Australia Telescope
+					redevelopment 1989)
+*/
+/*
+****************************************************************************
+
+					Antenna Tracking Control Unit
+
+						Sequencer Module
+
+						Copyright ( 1990 )
+
+_author:	L. Sciacca (Servo Consultant to TUNRA)
+
+_project:	Antenna Tracking Control Unit for Satellite tracking
+			system.
+
+_latest:	13 Oct 1990	LJS Design based on AT redesign for CSIRO 1989
+			18 Nov 1990 LJS Added new OFF_STATE state and system_ok line.
+			6 Dec 1990 LJS Changed way of doing rate mode slewing
+			12 Dec 1990 LJS Added dummy routine for watchdog
+			2-Feb-1991 LJS StarTracking states changed
+			3-June-1991 LJS Allowed one to issue hold command from all
+						slewing and driving states.
+			12-June-1991 LJS Code to data log variables
+			24-July-1991 LJS Changed code. Removed HOLD in s/w limits
+							cleaned up comments.
+			3-8-91 LJS Added NVRAM for S/W limits
+			5-8-1991 LJS Added error checking for prelimits, changed way
+					HOLDING was being done to cater for wierd s/w limits
+					Now timed slewing before tripping.
+			7-8-1991 LJS Added Sequencer Missed Count. Shos how many times
+					the sequencer over-runs its control tick.
+			2-10-1991 LJS Added error_set routines, stow limits and
+					software limits setable from NVRAM. Cleaned up errors.
+					Cleaned up comments. Removed unused diagnostic
+					star track routines.
+			9-10-1991 LJS Added interface to I/O routines.
+			26-4-1992 LJS Added support for open-loop voltage out when
+							in external state for system id experiments
+							and tuning. Also added systemid structure.
+
+			8-6-1994 LJS Added Intelsat and Intelsat Simulator
+
+****************************************************************************
+*/
+
+/*
+Functional Description:
+
+	This module contains the main sequencing software for the ATCU. It is
+intended to be run as the highest priority task within the real-time
+operating system, UNOS, developed by R. Betz ( 1990 ) of the University of
+Newcastle.
+
+	Its functions include:
+
+	. applying the latest control to the output DACs
+
+	. reading the position encoders so the next control rate command may be
+	calculated depending on the mode of operation.
+
+	. checking for safety conditions. These requirements may change
+	depending on the system to be controlled but normally includes software
+	travel limits and hardware limits. Also, some installations may require
+	wind speed checking. This may be a feature to be added on other systems.
+
+	. arbitrate the operation mode of the system. This includes the
+	following modes:
+
+		( cp_data.mode, atcu.mode )
+		- Position Designate
+		- Rate Designate
+		- Orbit Track
+		- Star Track
+
+	. Carry out commands if conditions permit. These commands include:
+		( cp_data.cmd, atcu.cmd )
+		- Drive start
+		- Drive stop
+		- Go ( for Rate/Pos/OrbitTrack/StarTrack )
+		- Hold
+		- Stow
+
+		This will be done by calling the appropriate routines. This is
+		carried out in a switch statement in the body of the sequencer.
+
+	. Determine the next state of the ATCU based on the hardware conditions,
+	the software state and current mode. These are:
+		( atcu.state )
+
+		- Off
+		- Standby
+		- Starting
+		- Stopping
+		- Holding
+		- Positioning
+		- Tracking
+		- Slewing
+		- Stowing
+		- Scanning
+		- External ( Allows open loop testing )
+		- Stowed ( when stow pin is in )
+
+	Timing Considerations
+	---------------------
+
+	There are not many time critical functions in the sequencer. It is
+required, however, that the sequencer run at the sampling rate of the
+control action.  A typical sampling rate is 15Hz. The limiting speed
+of carrying out commands is usually the user interface (e.g. a serial
+line operating at 9600 baud ).
+
+Timing is carried out using the timing features of UNOS which allow
+repetitive time-outs on a timer enabling precision timing for the sampling
+rates. The final jitter works out to be approximately the task switching
+time ( e.g. 200us for a 20MHz 386 ). The sequencer timer must be started
+before task activation and is done within the sequencer task before it waits
+for on the scheduling semaphore. A separate routine is activated by the
+timer every sampling instance. It is this routine ( also in the sequencer
+module ) that signals the sequencer semaphore. Timed waits are not
+appropriate in the situation.
+
+	Some time critical functions are:
+
+	. Rate control output to the DACs.
+
+	. Reading the position encoders.
+
+	. Ensuring the START bit is left high for >300ms. The START bit starts
+	the drives.
+
+	. Ensuring the RESET bit is kept low for >100ms. This resets the error
+	conditions on the drives.
+
+	. Ensuring some delay ( >500ms ) before checking the drives are "READY"
+	after the RESET line is pulsed.
+
+	. Ensuring some delay following pulsing the START bit before checking
+	the drives are "ON".
+
+	. Waiting 5 seconds to allow the structure and drives to settle on
+	holding before disabling the "RUN" line and depowering the drives.
+	( note. the FWD/REV lines should be disabled at the same time ).
+
+	The Sequencer was designed with the philosophy that state machines may
+	be invoked and switched dynamically. The coding was done in a linear
+	fashion purely to enable fast modification by people not familiar
+	with C pointer tables. Each state machine as will be used by the
+	ATCU is contained in a routine specified by its usual name followed by
+	'_sm' for state_machine. e.g.starting_sm.
+
+	The Sequencer has a number of internal states that are used to drive
+	the sequencer state machines. These internal states are used to drive
+	individual state machines. Only one state machine is running at any
+	one time, but a state machine may invoke another by changing the
+	atcu.state field. It is the atcu.state flag that determines which state
+	machine will be running at any one time.
+
+
+	Other Sequencer Functions
+
+	CALIBRATION: The calibration routine is called immediately after
+	getting the positions from the encoders.
+
+	OFFSETS: The offsets routine is called immediately after getting the next
+	AZ and EL positions from the star track routine.
+
+
+	SIMULATION CODE
+	---------------
+
+	Some simulaton code has been implemented
+	7-june/1995 :sto:
+		only the sequencer has been simulated
+		plc output, encoder readings still need to be done
+
+	OVERVIEW OF SEQUENCER
+	---------------------
+
+	To get an overview of the entire sequencer one need only look at the
+	routine, state_handler. In state_handler, one may see all of the state
+	machines.
+
+	The atcu.state can be changed in a wide variety of places. These are:
+
+	arbitrate_commands ( )
+		This routine looks at the current cp_data.cmd field (the control
+		point command for the sequencer ) and if a valid command
+		it will issue a command into the atcu.cmd field. This is
+		an atcu command NOT a position command. Possible commands are for instance
+		STOP, STOW, etc.
+
+	generate_next_state ( )
+		This takes the command from arbitrate_commands and works out
+		whether a new atcu.state should be invoked.
+
+	state_handler ( )
+		This is the heart of the sequencer. First it checks to see
+		whether it should force (i.e. over-ride CP commands) the state
+		to STANDBY because of an error condition.
+
+		Next it calls the ORBIT TRACK or STAR TRACK routines depending
+		on the atcu.mode and/or the atcu.state. These routines generate
+		new position commands to be used by the rest of the sequencer
+		and position control loops.
+
+		A case statement is then used to call the pertinent state machine
+		depending on the value of atcu.state.
+
+	position_state_machine ( )
+		The position loop code originally was fairly simple. However as the
+		complexity of the sequencing increased, so too did the position
+		loop. Rather than put complexity in the position loop code it was
+		decided to place the sequencing back into the sequencer. Thus
+		the sequencer must take care of resetting position loop filters
+		and PI loop parameters.
+
+	antenna_simulator ( )
+		Called only if we are in simulation mode. It was decided to call
+		the simulators from the sequencer rather than have separate tasks.
+		This is not ideal, but neither is having the simulators in the same
+		computer as the sequencer!
+
+	state_summary ( )
+		This routine creates a summary of the overall Antenna state.
+		It was found necessary for the benefit of the operators to
+		return a state that reflected the true state of the antenna.
+		E.g. one axis may be slewing, the other holding, we return then
+		that the antenna is slewing (not that it is holding).
+		This was done rather than return 2 states, one for each axis,
+		as it seems the operators may get confused!
+
+	Other Routines:
+
+	signal_watchdog ( )
+		Sends a pulse to the watch dog timer to stop it from resetting
+		the ATCU.
+
+	SOME IMPORTANT DATA STRUCTURES
+	------------------------------
+
+	atcu - Contains all of the relevant variables for the running of the
+			ATCU.
+
+	az/el - Contains all of the variables for the antenna axes e.g.
+			position and measured positions, drive signals.
+
+	cp_data - The control point structure contains the user specified
+			mode, az/el positions, desired wrap, and sequencer command.
+
+	software_limit - Contains the sequencer copy of the NVRAM software
+			limits. This is read at the start of every sequencer loop.
+
+	stow_pos - Contains the stow position structure. As with the s/w limits
+			this is read at the start of every sequencer loop.
+
+
+	systemid - Contains parameters used in external state.
+				These determine what voltage is output to the
+				DACs.
+
+	IMPORTANT STATE MACHINE VARIABLES
+	---------------------------------
+
+	atcu.state
+		This drives the over-all state machine. It is used in state_handler
+		routine to call the individual state machine. Possible states are
+		listed in seq.h.
+
+	atcu.internal
+		It is important to understand the difference between this state
+		and the atcu.az_internal and atcu.el_internal states.
+		This is the DESIRED state we want for BOTH axes. It drives the
+		individual state az_internal and el_internal.
+
+	atcu.az_internal/atcu.el_internal
+		Because either drive may be in a different state, it was found
+		necessary to keep track of each axis separately. Thus atcu.internal
+		is used to say HOLD the antenna but the az and el may be slewing.
+		On receiving a HOLD the az_internal and el_internal states will
+		be forced to HOLD but one may reach holding before the other.
+		Only when BOTH axes have settled and az_internal and el_internal
+		go to HOLDING will atcu.internal also go to the HOLDING state.
+
+	drive_state
+		This is an important variable as it dictates the state of the
+		drives themselves (as opposed to the state of the individual axes).
+		It is used to drive state machines for starting and depowering
+		the motor drives.
+
+	We may think of the above state inputs and outputs as cascaded
+	states. Each goes to a lower level of control beginning with
+	the user command and antenna environments as inputs, drive
+	state as output.
+
+	IN               State Handlers              OUT
+
+																							 _ atcu.az_internal
+	cp_data.cmd |                               |
+	cp_data.mode|-->atcu.state-->atcu.internal->|_ drive_state
+	I/O         |                               |
+												|_ atcu.el_internal
+
+
+
+*/
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <float.h>			/* holds prototype for _status87 */
+#include <dos.h>
+
+#include <unos.h>
+
+#include <seq.h>
+#include <unosdef.h>
+#include <posext.h>
+
+#include <screen.h>
+#include <seqscr.h>
+#include <seqext.h>
+
+#include <err_nums.h>
+
+#include <startrak.h>
+
+/*#include "steptrak.h"    /* function prototypes for step-track code */
+/*#include "kalman.h"	 /* function prototypes for kalman code */
+/*#include "modelsim.h"  */
+
+#include <cmclock.h>
+#include <nvramext.h>
+#include <err_ex1.h>
+#include <main_ext.h>	/* import get fcns for simulation & fp */
+#include "plc.h"		// typedef
+#include "plcext.h"
+#include "iohw.h"        /* import pc14 & pc74 i/o routines */
+#include <wdog.h>	/* Imports reset_watch_dog ( ) */
+
+#include <tuneout.h>	/* Imports spew_tune_data () */
+#include "tune.h"
+#include "simintel.h"	// Import simintel () Intelsat Simulation
+#include "..\posloop\poscon.h"
+
+#include <time.h>
+
+#define DEG_TO_RAD 57.29577951
+#define HRS_TO_RAD 3.8197	/* can put in a more accurate numebr 2-june*/
+
+#define CL_LENGTH		10
+
+CListNode *init_clist(int);
+CListNode *insert_clist(CListNode *, double, double);
+
+/*---- Local 'static' routines */
+static int arbitrate_commands ( void );
+void sequencer_timer ( int * timer_data_ptr );
+
+static unsigned int generate_next_state ( unsigned int latest_cmd );
+static void state_handler ( void );
+static void position_state_machine ( void );
+
+static unsigned int state_summary ( void );
+
+/* Sequencer (ATCU) state handlers */
+static void off_sm ( void );
+static void standby_sm ( void );
+static void powering_sm ( void );
+static void holding_sm ( void );
+static void starting_sm ( void );
+static void stopping_sm ( void );
+static void stowing_sm ( void );
+static void tracking_sm ( void );
+static void scanning_sm ( void );
+static void positioning_sm ( void );
+static void slewing_sm ( void );
+
+
+/* Support Routines */
+static void command_sw_limit ( void );
+static int check_az_sw_limits ( double msd );
+static int check_el_sw_limits ( double msd );
+
+static void init_state_machine ( void );
+//static void absolute_to_wrap ( double msd_absolute, double * msd );
+
+		/* Routine to do i/o to either real plant or simulator */
+static int driveio ( void );
+static void zero_rate_volts ( void );
+
+
+/*---- Return Functions for shared variables */
+axis return_azimuth ( void );
+axis return_elevation ( void );
+
+/*---- Function to determine absolute position from 0-360 reference */
+static double wrap_to_absolute ( double cmd360 );
+static double absolute ( double cmd360 );
+
+/*---- Watchdog function */
+static void signal_watchdog ( void );
+
+atcu_struct return_atcu ( void );
+
+void set_cp_data ( cp_data_struct * cp_data_parser );
+
+	/* return the <<sequencers version>> of the control point data */
+cp_data_struct return_cp_data ( void );
+
+/*----- Some shared accessible structures ----*/
+drive_in_struct drive_in_data;
+static timer_struc* sequence_cycle_timer;
+static atcu_struct atcu;
+static axis az;
+static axis el;
+
+static double signal_size;
+static double Az_Velocity;
+static TimeRecord time_stamp;
+static double data_time;
+static double testAz_Velocity;
+static double testdata_time;
+CListNode *clist;
+
+/* static drive_out_struct drive_out; */
+
+static cp_data_struct cp_data;
+static stow_pos_struct stow_pos;
+
+/*---- Time out storage for holding and stowing */
+static unsigned int az_holding_in_region_time_out;
+static unsigned int el_holding_in_region_time_out;
+
+static int az_holding_time_out;
+static int el_holding_time_out;
+static int holding_time_out;
+
+static unsigned char first_time_in_off_state = 1;
+
+static int drive_interface_error_count;
+
+static int reset_count;
+static int starting_pulse_count;
+static int PowerOnTimer;
+
+/*---- Drive states */
+static unsigned int drive_state;
+static unsigned int drive_reset_state;
+static unsigned int drive_word;
+
+/*---- scanning mode states & info */
+/* will have to make the info changeable later on */
+static unsigned int scan_state;
+static int scan_direction, scan_hold_timeout ;
+static double az_centre, el_centre, az_offset, el_offset;
+static double az_box_offset = 5.0, el_box_offset = 5.0 ;
+static double scan_incr = 0.4 ;
+#define SCAN_INIT	0
+#define SCAN_WAIT	1
+#define SCAN_HOLD	2
+#define SCAN_NEXT	3
+
+/*---- We use a flag to signal the sequencer is ready to be signalled again*/
+static unsigned int sequencer_ok;
+
+/*---- Adaptation switching */
+static unsigned int adaptation_switch;
+
+/*---- Software Limits */
+/* rjlov - changed from static */
+software_limit_struct sw_limits;
+
+/* Sequencer Error, if set then trip drives (serious error )*/
+unsigned char sequencer_error;
+
+/* Sequencer missed tick counter */
+static unsigned int sequencer_missed_count = 0;
+
+/* System Identification Structure. Used only in OFF state */
+static systemid_struct systemid;
+
+static unsigned int step_count;
+static double slew_region;
+
+static unsigned int sequencer_sem;
+static PLC_struct PLC;
+
+/* rjlov - changed from static */
+unsigned char LightsOn = 0;		// defines if lights are turned on
+
+/* flag to control when data is saved to file */
+static unsigned int	collect_data = 0;
+
+// Az speed
+static double az_speed;
+static double el_speed;
+static double az_pos_1, el_pos_1, az_pos_2, el_pos_2;
+
+extern int open_loop_flag;
+extern int az_flag;
+extern int graph_log_flag;
+
+#define MAX_DRIVE_ERROR_COUNT		5
+#define POINT_TOL 0.2
+/* The mechanical tolerance of the pointing accuracy  */
+/* used in the scanning algorithm */
+
+/*
+****************************************************************************
+sequence_task ( )
+
+	The sequencer  consists of a state machine to sequence various drive and
+change mode operations. The basic structure is illustrated below in block
+form.
+							atcu.state
+		------------------------------------------------
+		|												|
+		|			|-------------------|				|
+		----------->|					|---------------
+					|					|
+atcu.cmd----------->|					|
+					|	Sequencer		|
+drive outputs------>|					|-=-=-=-=-=-=-=-=->drive signals
+					|					|
+		----------->|					|-------------------|
+		|		--->|					|-----------|		|
+		|		|	|					|			|		|
+		|		|	---------------------			|		|
+		|		|	atcu.internal					|		|
+		|		------------------------------------|		|
+		|			drive_state								|
+		-----------------------------------------------------
+
+****************************************************************************
+*/
+void sequencer_task ( void * Dummy ) {
+
+	int temp;
+	unsigned int return_status;
+	TimeRecord boot_time;
+	FILE *fp,*f_ptr;
+	int data_counter=0;
+
+	enable ( );
+	Dummy = Dummy;
+
+	/* initialize the circular list */
+	clist = init_clist(CL_LENGTH);
+	f_ptr = get_graphptr();
+
+	/* Get the file pointer for the data-logging file */
+	fp = get_fileptr ( );
+
+	/* Do an initial reset of the watchdog for good measure */
+	reset_watch_dog ( );
+
+	if ( !get_simulation () )    /* if not in simulation mode */
+	{
+		// Init PC14 (Az/El encoder card)
+		/* 0x4A = 10010010, port A to input, port B to input and c for output    */
+		init_pc14 ( );
+
+		/* Initialise the pc-74 ADC & D/A card */
+		init_pc74 ( );
+	}
+
+	sequencer_sem = create_semaphore();
+	if(sequencer_sem != 0xffff)
+		init_semaphore (sequencer_sem, 0, 1 );
+
+	/*---- SHOULD DO THIS AFTER READING POSITION */
+	init_state_machine ( );
+
+	/*---- Normally done by MAIN task creation module */
+	init_default_sequencer ( );
+
+	/*---- Initialise the parser task variables before we schedule it */
+	init_parser ( );
+	cp_data.wrap = 1;
+
+	/*---- Init controller variables for (POSCON) */
+	init_position_controllers ( );
+
+	/*---- Init Intelsat Simulator */
+	init_simintel ( );
+
+	sequencer_ok = true;
+
+	timed_wait ( sequencer_sem, 18 );
+
+	/* Calculate boot time in fractions of seconds */
+	ReadClock ( &boot_time );
+	juldat(boot_time.dayofmonth,
+				boot_time.month,
+				( boot_time.century*100 + boot_time.year ),
+				boot_time.hours,
+				boot_time.minutes,
+			boot_time.hundredths*0.01 );
+
+	/*---- Set up any task dependent variables, incl timers */
+	/* Need to run every 2 time ticks if tick = 30Hz */
+	sequence_cycle_timer = start_timer ( REPETITIVE, 2, sequencer_timer, &temp );
+
+	/* The setting of this flag will shut down drives ! */
+	sequencer_error = 0;
+
+	// init speed regressors
+	az_pos_1 = read_az_encoder ( );
+	el_pos_1 = read_el_encoder ( );
+	az_pos_2 = az_pos_1;
+	el_pos_2 = el_pos_1;
+
+	/*---------------------------------------------------------------------*/
+	/*---- Task infinite loop starts here -------------------------------- */
+		/*---------------------------------------------------------------------*/
+
+	while ( 1 ) {
+
+		/* Wait on the timer semaphore. We use flags to prevent the
+		situation where the sequencer task over-runs the timer. Not likely
+		but we do it anyway to prevent repetitive signalling.
+		*/
+		sequencer_ok = true;
+		wait ( sequencer_sem );
+		sequencer_ok = false;
+
+		/*---- Do the watchdog thing */
+		//signal_watchdog ( );
+
+		/*---- Output latest control and get inputs ----*/
+		return_status = driveio ( );
+
+		az.msd		  = az.precalib_msd; // was az.msd_absolute
+		el.msd 		  = el.precalib_msd;
+
+		/*---- Convert msd AZ positions to msd (calibrated) and wrap */
+		// absolute_to_wrap ( az.msd_absolute, &az.msd );
+		/*
+		if ( az.msd > 180.0 )
+			az.msd_absolute = az.msd - 360.0;
+		else
+			az.msd_absolute = az.msd;
+		*/
+		az.msd_absolute = az.msd;
+
+		/*---- Update UP TIME of the system since boot */
+		atcu.up_time += CONTROL_PERIOD;
+
+		if ( return_status == 0 )
+			drive_interface_error_count++;
+		else
+			drive_interface_error_count = 0;
+
+		if ( drive_interface_error_count > MAX_DRIVE_ERROR_COUNT ) {
+			error_set ( DRIVE_INTERFACE_ERR );
+			sequencer_error = 1;
+			}
+
+		/*---- Get Software limits from NVRAM */
+		return_status = get_seq_software_limits ( &sw_limits );
+		if ( !return_status ) {
+			error_set ( SEQ_NVRAM_ERR );
+			sequencer_error = 1;
+			}
+
+		/*---- Get slew region from psoition module (stored in NVRAM */
+		slew_region = get_slew_region ( );
+
+		/*---- get the current mode from the command parser */
+		atcu.mode = cp_data.mode;
+
+		/*---- get the latest valid command */
+		atcu.cmd = arbitrate_commands ( );
+
+		/*---- If no new valid command, the cmd s/m section is idle. */
+		if ( atcu.cmd == 0 )
+			atcu.cmd = IDLE_CMD;
+
+		/*---- Generate new state */
+		atcu.state = generate_next_state ( atcu.cmd );
+
+		/*---- Do state handlers */
+		state_handler ( );
+
+		/*---- Position/Slew State Machine */
+		position_state_machine ( );
+
+		if ( collect_data )
+		{
+//			fprintf ( fp, " %f %f %f ", az.msd, az.err, az.dem_rate );
+//			fprintf ( fp, "%f %f %f\n", el.msd, el.err, el.dem_rate );
+			data_time = time_stamp.hours*3600.0 + time_stamp.minutes*60.00 ;
+			data_time += time_stamp.seconds ;   // seconds
+			fprintf ( fp, "%f ", data_time );
+			fprintf ( fp, "%f %f %f %f \n", az.msd, el.msd, signal_size, Az_Velocity);
+		}
+
+		/* the values for testing runs are assigned here */
+		testdata_time+= 0.5;
+		testAz_Velocity = sin(testdata_time);
+
+		/* every time a new value of Az_Velocity is sampled it needs to
+			 be stored in memory for the purpose of plotting the graph. The
+			 respective data_time value is also stored. These values are
+			 stored in a circular list of length CL_LENGTH. */
+
+		/* Logs one screen full of data points if graph_log_flag is high */
+
+		clist = insert_clist(clist, testdata_time, testAz_Velocity);
+		if ((data_counter <320) && (graph_log_flag == 1))
+		{
+			if (!((testAz_Velocity > -0.0001) && (testAz_Velocity < 0.0001)))
+			{
+				fprintf(f_ptr,"%f	%f\n",testdata_time*10.0, testAz_Velocity);
+				//fprintf(f_ptr,"%f	%f\n",data_time, Az_Velocity);
+				data_counter++;
+			}
+		}
+
+		/*---- This must go last as it will reflect the over-all state of
+				the antenna drive system
+		*/
+		atcu.state_summary = state_summary ( );
+
+	} /* end of infinite while loop */
+
+} /* End of sequence_task */
+
+
+
+/*
+****************************************************************************
+sequencer_timer
+
+	Routine called on the time-out of the timer created in sequencer task.
+This routine merely signals the sequencer semaphore. The sequencer will then
+be scheduled as the next task as it should be the highest priority.
+
+****************************************************************************
+*/
+void sequencer_timer ( int * temp ) {
+
+	if ( sequencer_ok )
+		_signal ( sequencer_sem );
+	else
+		sequencer_missed_count++;
+
+	*temp = 1;		/* avoids warning on compilation only */
+
+} /* End of sequencer_timer */
+
+
+
+/*
+***************************************************************************
+driveio
+	Purpose:
+	1) send rate command to drives
+	2a) read encoders -> antenna angle measurements
+	2b) read signal-strength from horn
+	3) read PLC data
+	4) send commands to PLC
+SIMULATION CODE ADDED 7-JUNE 1995	STO
+	simulates only perfect response from PLC to input commands
+	NOT COMPLETE SIMULATION
+***************************************************************************
+*/
+static int driveio ( ) {
+
+	unsigned char status_az = 0;
+	//unsigned char status_el = 0;
+
+		/* Output Rate command to the drives */
+		OutputElVolts_temp ( el.rate_volts );
+		OutputAzVolts_temp ( az.rate_volts );
+		/* Did not put these inside if-statement as wanted */
+		/* to output control output at regular times. */
+
+	if ( !get_simulation () )
+	{
+		/* Get Encoder Readings */
+		az.precalib_msd = read_az_encoder ( );
+		el.precalib_msd = read_el_encoder ( );
+		signal_size = InputSigVolts ( );
+		Az_Velocity = TachoSig ( );   /* samples tacho signals from pc-74 */
+		ReadClock ( &time_stamp );
+	}
+	else if ( (az.on_on) && (el.on_on) )
+	{
+		/* simplistic simulation of antenna response - not realistic at all */
+		az.precalib_msd = az.precalib_msd + az.rate_volts * AZ_RATE_GAIN / 5;
+		el.precalib_msd = el.precalib_msd + EL_RATE_GAIN * el.rate_volts / 5;
+/*
+		az.precalib_msd = 0.8*az_pos_1 + 0.2*az.cmd ;
+		el.precalib_msd = 0.9*el_pos_1 + 0.1*el.cmd ;
+*/
+		signal_size = 0.0;
+		Az_Velocity = 0.0;
+		ReadClock ( &time_stamp );
+	}
+	cp_data.signal = signal_size ;
+	cp_data.velocity = Az_Velocity ;
+
+	// Get true antenna rate in deg/sec
+	az_speed = (az.precalib_msd - az_pos_2)/0.0666;
+	az_pos_1 = az.precalib_msd;
+	az_pos_2 = az_pos_1;
+	el_speed = (el.precalib_msd - el_pos_2)/0.0666;
+	el_pos_1 = el.precalib_msd;
+	el_pos_2 = el_pos_1;
+
+
+	/* Get wrap position. */
+	/* if ( wrap_is_CCW ( ) )
+		az.msd_wrap = CCW_WRAP;
+	else
+		az.msd_wrap = CW_WRAP;
+	*/
+	// Read PLC word and get info if not in simulation mode
+	// NB the plc is not fully simulated - 11/june/95 sto
+	if ( !get_simulation( ) )
+	{
+
+		ReadPLC ( &PLC );
+
+	// Now cross check the data
+	az.on_on = PLC.RUN1;
+	el.on_on = PLC.RUN2;
+
+	// C1 and C2 are the AC contactors to the drives
+	az.power_on = PLC.C1;
+	el.power_on = PLC.C2;
+
+	az.drive_fail = PLC.Fail | PLC.Trip1 | PLC.Trip | PLC.C24VDC | PLC.CB4;
+	el.drive_fail = az.drive_fail | PLC.EmergStop | PLC.SmokeDetect | PLC.CB3;
+
+	az.finallimit = PLC.AzFinalCW | PLC.AzFinalCCW;
+	el.finallimit = PLC.ElFinalUp | PLC.ElFinalDwn;
+
+	} /* finish getting plc stuf if not in simulation mode */
+
+	// Write to PLC words
+	if ( LightsOn )
+		drive_word = drive_word | lights_on;
+	else
+		drive_word = drive_word & ~(lights_on);
+
+	/* only send commands to plc if not in simulation mode */
+	if ( !get_simulation() )
+		WritePLC ( drive_word );
+
+	/*---- Get travel software limits */
+	az.in_sw_limit = check_az_sw_limits ( az.msd_absolute );
+	el.in_sw_limit = check_el_sw_limits ( el.msd );
+
+	/*---- Get the stowpin in status */
+	az.stowpin = PLC.AzBrake;
+	el.stowpin = PLC.ElBrake;
+
+	/*---- Get the System status's */
+	atcu.system_ok = 1;
+
+	return ( status_az );
+
+} /* end of drive_io */
+
+
+/*
+****************************************************************************
+init_state_machine ( )
+
+	Routine to initialise the state machine and associated variables to a
+predefined state. This routine should be called on power up of the ATCU
+(i.e. booting the task for the first time. )
+
+****************************************************************************
+*/
+void init_state_machine ( ) {
+
+	adaptation_switch = 1;
+
+	/*---- Init ATCU Data structure */
+	atcu.operation = SIMULATION;
+	atcu.state = OFF_STATE;
+	atcu.mode = POSITION_MODE;
+	atcu.internal = STANDBY;
+	atcu.az_internal = STANDBY;
+	atcu.el_internal = STANDBY;
+	atcu.last_cmd = POWER_OFF_CMD;
+	atcu.comm_errors = 0;
+	atcu.up_time = 0.0;
+	atcu.sample_period = 0.066;
+
+	drive_state = STANDBY;
+	drive_reset_state = STANDBY;
+	drive_word = 0;
+	reset_count = RESET_TIME;
+
+	/*---- Init Az and El data structures */
+	az.cmd = 20;
+	el.cmd = 10;
+	az.err = 0;
+	el.err = 0;
+	az.msd_absolute = 45.0;
+	el.msd = 30.0;
+	az.in_sw_limit = 0;
+	el.in_sw_limit = 0;
+	az.signals = 0x3;
+	el.signals = 0x3;
+
+	drive_interface_error_count = 0;
+
+	/*---- Init control point data structure */
+	cp_data.cmd = IDLE_CMD;
+	cp_data.mode = POSITION_MODE;
+	cp_data.az_cmd = 20.0;
+	cp_data.el_cmd = 30.0;
+	cp_data.ra_cmd = 0.0;
+	cp_data.dec_cmd = 0.0;
+	cp_data.wrap = CW_WRAP;
+	cp_data.az_dem_rate = 0.0;
+	cp_data.el_dem_rate = 0.0;
+	cp_data.az_rate_offset = 0.0;
+	cp_data.el_rate_offset = 0.0;
+
+	/*---- Init system identification parameters */
+	systemid.azv = 0.0;
+	systemid.elv = 0.0;
+	systemid.step_per = 10;	/* 5 seconds */
+
+} /* End of init_state_machine */
+
+/*
+****************************************************************************
+init_default_sequencer
+
+	This routine initialises the Sequencer to some default values. Here we
+set values that would normally be set by the NVRAM procedures. This is 
+necessary if the NVRAM is empty.
+
+****************************************************************************
+*/
+void init_default_sequencer ( ) {
+
+	sw_limits.az_cw_limit = AZ_CW_LIMIT;
+	sw_limits.az_ccw_limit = AZ_CCW_LIMIT;
+	sw_limits.el_up_limit = EL_UP_LIMIT;
+	sw_limits.el_down_limit = EL_DOWN_LIMIT;
+
+} /* init_default_sequencer */
+
+
+/*
+****************************************************************************
+generate_next_state
+
+	Routine to process latest command and output next state.
+
+****************************************************************************
+*/
+static unsigned int generate_next_state ( unsigned int latest_cmd ) {
+
+	unsigned int next_state;
+
+	next_state = atcu.state;
+
+		switch ( latest_cmd ) {
+
+			case POWER_ON_CMD:
+				next_state = POWERING_ON;
+				PowerOnTimer = POWERON_TIMEOUT;
+				break;
+
+			case POWER_OFF_CMD:
+				next_state = OFF_STATE;
+				break;
+
+			case LIGHTS_ON_CMD:
+				LightsOn = lights_on;
+				break;
+
+			case LIGHTS_OFF_CMD:
+				LightsOn = 0;
+				break;
+
+			case DATA_ON_CMD:
+				collect_data = 1;
+				break;
+
+			case DATA_OFF_CMD:
+				collect_data = 0;
+				break;
+
+			case HOLD_CMD:
+				next_state = HOLDING;
+				break;
+
+			case STOW_CMD:
+				next_state = STOWING;
+				break;
+
+			case SCAN_ON_CMD:
+				next_state = SCANNING;
+				scan_state = SCAN_INIT;
+				break;
+
+			case SCAN_OFF_CMD:
+			case GO_CMD:
+				switch ( atcu.mode ) {
+					case RATE_MODE:
+						next_state = SLEWING;
+						break;
+
+					case POSITION_MODE:
+						next_state = POSITIONING;
+						break;
+					case STEPTRACK_MODE:
+					case KALMANTRACK_MODE:
+						next_state = HOLDING;
+						break;
+					case POSITION_RADEC_MODE:
+					case STARTRACK_MODE:
+					case LEOTRACK_MODE:
+					case INTELSAT_MODE:
+						next_state = TRACKING;
+						break;
+
+					default:
+						break;
+
+					} /* switch */
+
+				break;
+
+			case DRIVE_START_CMD:
+				next_state = STARTING;
+				break;
+
+			case DRIVE_STOP_CMD:
+				next_state = STOPPING;
+				break;
+
+			case IDLE_CMD:
+				break;
+
+			default:
+				break;
+
+			} /* switch */
+
+	return ( next_state );
+
+} /* end of generate_next_state */
+
+
+/*
+****************************************************************************
+state_handler
+
+	Routine to process the demanded state and put the sequencer into the
+correct state based on environment conditions at the time.
+
+It dynamically changes atcu.state to reflect the real state of the atcu.
+
+****************************************************************************
+*/
+static void state_handler ( ) {
+
+	station_position	station_location;
+	double time_from_epoch;
+
+	int star_num, sat_num;
+
+	TimeRecord time;
+	TimeRecord epoch_time;
+
+	star_details_struct star_details;
+
+	double act_az,act_el,power;
+	clock_t t,start_time;              /* step-track definitions fred&eric*/
+
+	/*---- Force a stowed state if the stowpins are in */
+/*	if ( ( az.stowpin ) || ( el.stowpin ) ) {
+		drive_word = ( stop_open );
+		atcu.state = STOWED;
+		atcu.internal = STANDBY;
+		atcu.az_internal = STANDBY;
+		atcu.el_internal = STANDBY;
+		}
+*/	 /* Replace the STOWED state with the OFF state, if the state
+		is presently STOWED and the stowpin is not in. */
+/*	else if ( atcu.state == STOWED )
+	{
+		atcu.state = OFF_STATE;
+		}
+*/
+	/*---- Force an OFF state if a prelimit has been reached */
+	if ( ( az.finallimit ) || ( el.finallimit ) ) {
+		drive_word = ( stop_open );
+		//atcu.state = OFF_STATE;
+		atcu.internal = STANDBY;
+		atcu.az_internal = STANDBY;
+		atcu.el_internal = STANDBY;
+		}
+
+	/*if ( !atcu.system_ok ) {
+		atcu.state = OFF_STATE;
+		error_set ( PLC_FORCED_OFF_ERR );
+		}
+	*/
+
+	if ( az.drive_fail || el.drive_fail ) {
+		error_set ( DRIVE_SYSTEM_FAILURE );
+		atcu.state = OFF_STATE;
+		}
+
+	/* Call LEOTrack or StarTrack depending on Mode if in the TRACKING state*/
+
+	if ( ( atcu.state == TRACKING ) || ( scan_state == SCAN_INIT ) )
+		switch ( atcu.mode ) {
+
+			case STEPTRACK_MODE:
+/*				t=clock()/CLOCKS_PER_SEC;
+				act_az = az_pos_sat(t);
+				act_el = el_pos_sat(t);
+				power = power_calc(act_az,act_el,az.msd,el.msd);
+				hillclimbing_sm(&atcu.state,&az.cmd,&el.cmd,&az.msd,&el.msd,&power);
+
+//problems in getting code to link properly may-95 STO
+/*
+	I think the problem is that the code is so damn HUGE!!
+	which may have caused problems in linking new code to old.
+	The solution is to recompile the whole bloody lot!!
+	At least in Borland C++ v4.0     26-may/95 - STO
+*/
+			break;
+
+			case KALMANTRACK_MODE:
+ /*				t = clock()/CLOCKS_PER_SEC;
+				act_az=az_pos_sat(t);
+				act_el=el_pos_sat(t);
+				power=power_calc(act_az,act_el,az.msd,el.msd);
+				kalman_sm(&atcu.state,&az.cmd,&el.cmd,&az.msd,&el.msd,&power,
+								t,&start_time); */
+			break;
+								
+			case LEOTRACK_MODE:
+			break;
+
+			case INTELSAT_MODE:
+				{
+				ReadClock ( &time );
+
+				// Get Intelsat Model epoch setting
+				get_current_satellite_num( &sat_num );
+				get_intelsat_epoch ( sat_num, &epoch_time );
+
+				time_from_epoch = fdfDurationInDaysFrom ( &epoch_time,
+														&time );
+
+				// Note returns an error if nvram error.
+				// Check this error and change state if nvram error
+				// reporting error to CMUs
+				GetIntelsatAzEl ( time_from_epoch,
+							&az.cmd,
+							&el.cmd );
+
+				}
+			break;
+
+			case STARTRACK_MODE:
+			break; /* disable the star trcack mode for the moment */
+			/* need some error checking to stop crashing - sto 11/8/95 */
+			/* Get the time */
+			{
+				ReadClock ( &time );
+
+				get_station_position( &station_location );
+
+				/* NB Time must be UTC in final version */
+				star_track (
+					star_details.right_ascension/DEG_TO_RAD,
+					star_details.declination/DEG_TO_RAD,
+					star_details.epoch_mode,
+					time.dayofmonth, time.month,
+					( time.century*100 + time.year ),
+					time.hours-10, time.minutes,
+					(time.seconds + time.hundredths*0.01),
+					station_location.longitude/DEG_TO_RAD,
+					station_location.latitude/DEG_TO_RAD,
+					&az.cmd,
+					&el.cmd );
+
+					az.cmd = az.cmd*DEG_TO_RAD;
+					el.cmd = el.cmd*DEG_TO_RAD;
+
+			}
+			break;
+
+			case POSITION_RADEC_MODE:
+				{
+			/* Get the time */
+				ReadClock ( &time );
+
+				get_station_position( &station_location );
+
+				/* NB Time must be UTC in final version */
+				/* fudged this conversion from Aust EST to UT         */
+				/* This code is now only good for locations in the    */
+				/* same time-zone as Melbourne		*/
+				star_track (
+					cp_data.ra_cmd/HRS_TO_RAD,
+					cp_data.dec_cmd/DEG_TO_RAD,
+					3,
+					time.dayofmonth, time.month,
+					( time.century*100 + time.year ),
+					time.hours-10, time.minutes,
+					(time.seconds + time.hundredths*0.01),
+					station_location.longitude/DEG_TO_RAD,
+					station_location.latitude/DEG_TO_RAD,
+					&az.cmd,
+					&el.cmd );
+
+					az.cmd = cp_data.az_cmd = az.cmd*DEG_TO_RAD;
+					el.cmd = cp_data.el_cmd = el.cmd*DEG_TO_RAD;
+
+				}
+			break;
+
+		default:
+			break;
+		} /* switch ( atcu.mode ) */
+
+
+	/*---- State Machine for ATCU State */
+	switch ( atcu.state ) {
+
+			case OFF_STATE:
+				off_sm ( );
+				break;
+
+			case POWERING_ON:
+				powering_sm ( );
+				break;
+
+			case STARTING:
+				starting_sm ( );
+				break;
+
+			case STOPPING:
+				stopping_sm ( );
+				break;
+
+			case HOLDING:
+				holding_sm ( );
+				break;
+
+			case TRACKING:
+				tracking_sm ( );
+				break;
+
+			case POSITIONING:
+				positioning_sm ( );
+				break;
+
+			case SCANNING:
+				scanning_sm ( );
+				break;
+
+			case SLEWING:
+				slewing_sm ( );
+				break;
+
+			case STOWING:
+				stowing_sm ( );
+				break;
+
+			case STOWED:
+				break;
+
+			case STANDBY:
+				standby_sm ( );
+				break;
+
+			default:
+				break;
+
+			} /* switch ( atcu.state ) */
+
+} /* end of state_handler */
+
+
+/*
+****************************************************************************
+position_state_machine
+
+	Routine to do position loop or slew rate loop based on demanded atcu
+state. It dynamically changes atcu.state to reflect the real state of the
+atcu.
+
+	Note that the waiting for source state is now redundant. It
+	was originally in to solve problems associated with the
+	strange software limit system we had to enforce originally.
+
+****************************************************************************
+*/
+static void position_state_machine ( ) {
+
+	/*---- Convert cmd and wrap to absolute positions */
+	/* NB Hold state machine should use cmd_absolute !!!! */
+	/* Only need to call this if in Orbitrack, and position modes */
+	/* Only call if tracking */
+	if ( (atcu.az_internal != HOLD ) || ( atcu.az_internal != HOLDING ) )
+		if ( ( atcu.state == TRACKING ) ||
+			( atcu.state == SCANNING ) ||
+			( atcu.state == POSITIONING ) )
+			{
+			// change next function to absolute(az.cmd) if not
+			// usung a system with wrap ambiguity
+			az.cmd_absolute = wrap_to_absolute(az.cmd);
+			/*
+			az.cmd_absolute = absolute ( az.cmd );
+			*/
+			}
+
+	/*---- Clip values if out of sw limits ONLY if not stowing */
+	if ( atcu.state != STOWING )
+		command_sw_limit ( );
+
+	/*---- Calculate next control based on az/el_cmds and/or az_control */
+	/* find the error for sequencer  taboo*/
+	if (open_loop_flag == 1)
+		 az.cmd_absolute = az.msd_absolute;
+
+	/* find the error for sequencer */
+	az.err = az.cmd_absolute - az.msd_absolute;
+	el.err = el.cmd - el.msd;
+
+	switch ( atcu.mode ) {
+		case RATE_MODE:
+			adaptation_switch = 0;
+			break;
+
+		case POSITION_MODE:
+			adaptation_switch = 0;
+			break;
+
+		case POSITION_RADEC_MODE:
+			adaptation_switch = 0;
+			break;
+
+		case STEPTRACK_MODE:
+			adaptation_switch = 0;
+			break;
+
+		case STARTRACK_MODE:
+			adaptation_switch = 1;
+			break;
+
+		case LEOTRACK_MODE:
+			adaptation_switch = 0;
+			break;
+
+		case INTELSAT_MODE:
+			adaptation_switch = 0;
+			break;
+
+		default:
+			adaptation_switch = 0;
+			break;
+
+		} /* switch */
+
+	switch ( atcu.az_internal ) {
+		case HOLD:
+		case HOLDING:
+		case SLEWING_IN_POSITION:
+		case DRIVING_TO_STOW:
+			// Check if drives have failed while operating.
+			if ( (!az.on_on) || (!el.on_on ) )
+				{
+				atcu.state = OFF_STATE;
+				drive_word = ( stop_open );
+				}
+
+			/* Do check for time outs here for holding case */
+			if ( fabs ( az.err ) > slew_region ) {
+				az_holding_in_region_time_out = 0;
+				az_holding_time_out = HOLDING_TIME;
+
+				atcu.az_internal = SLEWING_IN_POSITION;
+
+				if ( az.err > 0 )
+					az.dem_rate = MAX_POS_ANTENNA_SPEED;
+				else
+					az.dem_rate = MAX_NEG_ANTENNA_SPEED;
+
+				az.control_code = RATE_ONLY;
+				reset_pos_filters ( AZ_AXIS, az.msd_absolute );
+
+				}
+			else {
+
+				az.control_code = POSITION_RATE;
+
+				if ( fabs ( az.err ) < HOLDING_ERROR ) {
+					if ( az_holding_in_region_time_out++ == HOLDING_IN_REGION_TIME )
+						atcu.az_internal = HOLDING;
+
+					az_holding_time_out = HOLDING_TIME; /* keep testing for problems */
+					}
+				else {
+					atcu.az_internal = HOLD;
+					az_holding_time_out--;
+					az_holding_in_region_time_out = 0;
+					}
+				}
+
+			/*---- We may have timed out in which case we should kill drives */
+			/* For simplicity both drives will be cut in the event of drive failure
+			in either drive.
+			*/
+			if ( ( az_holding_time_out < 0 ) || ( el_holding_time_out < 0 ) ) {
+				error_set ( UNABLE_TO_CONTROL_ERR );
+				drive_word = ( stop_open );
+				atcu.state = STANDBY;
+				atcu.internal = STANDBY;
+				atcu.az_internal = STANDBY;
+				atcu.el_internal = STANDBY;
+				}
+
+			break;
+
+		/* The following caters for 'holding' while we wait for a source
+		to rise. This is different from normal holding which uses the
+		current measured positions. It was necessary to break the slewing
+		into two cases so we could return to the relevant state once errors
+		have become reasonable. We may be slewing while carrying out the
+		WAITING facility or slewing during tracking manuevres.
+		*/
+		case SLEWING_IN_TRACKING:	/* Star Track and Orbit Track cases */
+		case SLEWING_IN_WAITING:
+			if ( fabs ( az.err ) > slew_region ) {
+				az_holding_in_region_time_out = 0;
+				az_holding_time_out = HOLDING_TIME;
+
+				if ( az.err > 0 )
+					az.dem_rate = MAX_POS_ANTENNA_SPEED;
+				else
+					az.dem_rate = MAX_NEG_ANTENNA_SPEED;
+
+				az.control_code = RATE_ONLY;
+				reset_pos_filters ( AZ_AXIS, az.msd_absolute );
+
+				}
+			else {
+				if ( atcu.az_internal == SLEWING_IN_WAITING )
+					atcu.az_internal = WAITING_FOR_SOURCE;
+				else
+					atcu.az_internal = TRACKING;
+
+				az.control_code = POSITION_RATE;
+				}
+
+			break;
+
+		case WAITING_FOR_SOURCE:
+		case SCANNING:
+		case TRACKING:
+			/* Go to slewing mode if error is great */
+			// fix this--------------------------
+			if ( fabs ( az.err ) > slew_region ) {
+				az_holding_in_region_time_out = 0;
+				az_holding_time_out = HOLDING_TIME;
+
+				if ( atcu.az_internal == WAITING_FOR_SOURCE )
+					atcu.az_internal = SLEWING_IN_WAITING;
+				else
+					atcu.az_internal = SLEWING_IN_TRACKING;
+
+				if ( az.err > 0 )
+					az.dem_rate = MAX_POS_ANTENNA_SPEED;
+				else
+					az.dem_rate = MAX_NEG_ANTENNA_SPEED;
+
+				az.control_code = RATE_ONLY;
+				reset_pos_filters ( AZ_AXIS, az.msd_absolute );
+
+				}
+			else {
+				az.control_code = POSITION_RATE;
+				}
+
+			break;
+
+		case SLEWING:
+			az.control_code = POSITION_RATE;
+			break;
+
+		default:
+			break;
+		} /* switch az_internal */
+
+
+	/*---- Elevation Position/Slew S/M */
+	switch ( atcu.el_internal ) {
+		case HOLD:
+		case HOLDING:
+		case SLEWING_IN_POSITION:
+		case DRIVING_TO_STOW:
+			/* Do check for time outs here for holding case */
+			if ( fabs ( el.err ) > slew_region ) {
+				el_holding_in_region_time_out = 0;
+				el_holding_time_out = HOLDING_TIME;
+
+				atcu.el_internal = SLEWING_IN_POSITION;
+
+				if ( el.err > 0 )
+					el.dem_rate = MAX_POS_ANTENNA_SPEED;
+				else
+					el.dem_rate = MAX_NEG_ANTENNA_SPEED;
+
+				el.control_code = RATE_ONLY;
+				reset_pos_filters ( EL_AXIS, el.msd );
+
+				}
+			else {
+
+				el.control_code = POSITION_RATE;
+
+				if ( fabs ( el.err ) < HOLDING_ERROR ) {
+					if ( el_holding_in_region_time_out++ == HOLDING_IN_REGION_TIME )
+						atcu.el_internal = HOLDING;
+
+					el_holding_time_out = HOLDING_TIME; /* keep testing for problems */
+					}
+				else {
+					atcu.el_internal = HOLD;
+					el_holding_time_out--;
+					el_holding_in_region_time_out = 0;
+					}
+				}
+
+			/*---- We may have timed out in which case we should kill drives */
+			/* For simplicity both drives will be cut in the event of drive failure
+			in either drive.
+			*/
+			if ( ( az_holding_time_out < 0 ) || ( el_holding_time_out < 0 ) ) {
+				error_set ( UNABLE_TO_CONTROL_ERR );
+				drive_word = ( stop_open );
+				atcu.state = STANDBY;
+				atcu.internal = STANDBY;
+				atcu.az_internal = STANDBY;
+				atcu.el_internal = STANDBY;
+				}
+
+			break;
+
+		/* The following caters for 'holding' while we wait for a source
+		to rise. This is different from normal holding which uses the
+		current measured positions. It was necessary to break the slewing
+		into two cases so we could return to the relevant state once errors
+		have become reasonable. We may be slewing while carrying out the
+		WAITING facility or slewing during tracking manuevres.
+		*/
+		case SLEWING_IN_TRACKING:	/* Star Track and Orbit Track cases */
+		case SLEWING_IN_WAITING:
+			if ( fabs ( el.err ) > slew_region ) {
+				el_holding_in_region_time_out = 0;
+				el_holding_time_out = HOLDING_TIME;
+
+				if ( el.err > 0 )
+					el.dem_rate = MAX_POS_ANTENNA_SPEED;
+				else
+					el.dem_rate = MAX_NEG_ANTENNA_SPEED;
+
+				el.control_code = RATE_ONLY;
+				reset_pos_filters ( EL_AXIS, el.msd );
+
+				}
+			else {
+				if ( atcu.el_internal == SLEWING_IN_WAITING )
+					atcu.el_internal = WAITING_FOR_SOURCE;
+				else
+					atcu.el_internal = TRACKING;
+
+				el.control_code = POSITION_RATE;
+				}
+
+			break;
+
+		case WAITING_FOR_SOURCE:
+		case SCANNING:
+		case TRACKING:
+			/* Go to slewing mode if error is great */
+			if ( fabs ( el.err ) > slew_region ) {
+				el_holding_in_region_time_out = 0;
+				el_holding_time_out = HOLDING_TIME;
+
+				if ( atcu.el_internal == WAITING_FOR_SOURCE )
+					atcu.el_internal = SLEWING_IN_WAITING;
+				else
+					atcu.el_internal = SLEWING_IN_TRACKING;
+
+				if ( el.err > 0 )
+					el.dem_rate = MAX_POS_ANTENNA_SPEED;
+				else
+					el.dem_rate = MAX_NEG_ANTENNA_SPEED;
+
+				el.control_code = RATE_ONLY;
+				reset_pos_filters ( EL_AXIS, el.msd );
+
+				}
+			else {
+				el.control_code = POSITION_RATE;
+				}
+
+			break;
+
+		case SLEWING:
+			el.control_code = POSITION_RATE;
+			break;
+
+		default:
+			break;
+
+		} /* switch el_internal */
+
+	/* Only do position loop if drives are actually enabled */
+	if ( drive_state == DRIVES_ENABLED ) {
+		/*---- Do Control loops depending on what is chosen */
+		switch ( az.control_code ) {
+
+			case POSITION_RATE:
+			/* can use pid_controller or open_loop_controller for azumith */
+			if (open_loop_flag == 0)
+				az.dem_rate = pid_control_loop ( AZ_AXIS, adaptation_switch, az.cmd_absolute,
+														az.msd_absolute );
+			else
+				az.dem_rate = open_loop_controller();
+
+
+			case RATE_ONLY:
+				az.rate_volts = rate_limiter ( AZ_AXIS, az.dem_rate );
+				break;
+
+
+			default:
+				break;
+
+			} /* end of switch az.control_code */
+
+		switch ( el.control_code ) {
+
+			case POSITION_RATE:
+			/* use pid_controller for elevation */
+				el.dem_rate = pid_control_loop ( EL_AXIS, adaptation_switch, el.cmd,
+														el.msd );
+
+			case RATE_ONLY:
+				el.rate_volts = rate_limiter ( EL_AXIS, el.dem_rate );
+				break;
+
+			default:
+				break;
+
+			} /* end of switch az.control_code */
+
+		} /* if drive_state */
+
+} /* end of position_state_machine */
+
+
+/*
+============================================================================
+
+					Sequencer State Machines
+
+============================================================================
+*/
+	/* adding simulation condition 7-june/1995	sto */
+
+/*
+****************************************************************************
+off_sm
+
+	This state machine merely puts all drive status's in a known state. It
+also clears the drive digital io word to ensure the drives are forced to
+stop.
+
+	We enter this state if the system_ok line is low or the drives are not
+ready ( power off or fail conditions ). If there has been a fail condition
+( but the system is still ok ) we should try to get the ready lights back by
+doing a  system reset. This is done here to try to change the state to
+standby thereby allowing the operator to do a start procedure again. Should
+the drives still fail then the operator should attempt to start the drives
+manually using the manual rate box and see where the trouble is. Possible
+problems are IOC, tacho loss/overspeed and real board failure.
+
+****************************************************************************
+*/
+static void off_sm ( ) {
+
+	drive_state = STANDBY;
+	//atcu.internal = STANDBY;
+	atcu.az_internal = STANDBY;
+	atcu.el_internal = STANDBY;
+
+	/* Update positions */
+	az.cmd_absolute = az.msd_absolute;
+	el.cmd = el.msd;
+
+	reset_pos_parameters ( AZ_AXIS, az.msd_absolute );
+	reset_pos_parameters ( EL_AXIS, el.msd );
+
+	/* Ensure the DACs are zeroed */
+	zero_rate_volts ( );
+
+	/* simulate action of commands & antenna + plc's response here  */
+	if ( get_simulation () )
+		az.power_on = el.power_on = 0;
+
+	if ( !az.power_on )
+		atcu.az_internal = OFF_STATE;
+
+	if ( !el.power_on )
+		atcu.el_internal = OFF_STATE;
+
+	// Reset the PLC states once upon entering OFF_STATE
+	if ( first_time_in_off_state )
+		{
+		first_time_in_off_state = 0;
+		reset_count = RESET_TIME;
+		}
+
+	if ( reset_count-- )
+		drive_word = reset_high;
+	else
+		drive_word = stop_open;
+
+} /* end of off_sm */
+
+
+
+
+/*
+****************************************************************************
+standby_sm
+
+	This state machine merely puts all drive status's in a known state. It
+also clears the drive digital io word to ensure the drives are forced to
+stop.
+
+****************************************************************************
+*/
+static void standby_sm ( ) {
+
+	drive_word = ( stop_open | poweron );
+
+	drive_state = STANDBY;
+	drive_reset_state = STANDBY;
+	atcu.internal = STANDBY;
+	atcu.az_internal = STANDBY;
+	atcu.el_internal = STANDBY;
+
+	/* Update positions to current measured */
+	az.cmd_absolute = az.msd_absolute;
+	el.cmd = el.msd;
+
+	reset_pos_parameters ( AZ_AXIS, az.msd_absolute );
+	reset_pos_parameters ( EL_AXIS, el.msd );
+
+	/* Ensure the DACs are zeroed if not in simulation mode */
+	if ( !get_simulation () )
+		zero_rate_volts ( );
+
+	if ( (!az.power_on) || (!el.power_on) )
+		atcu.state = OFF_STATE;
+
+} /* end of standby_sm */
+
+/*
+****************************************************************************
+powering_sm
+
+Close CB4 and CB5 circuit breakers.
+
+****************************************************************************
+*/
+static void powering_sm ( ) {
+
+	drive_word = ( stop_open | poweron );
+
+	/* simulate action of commands & antenna + plc's response here  */
+	if ( ( get_simulation () ) && (PowerOnTimer <= 10) )
+		az.power_on = el.power_on = 1;
+
+	drive_state = STANDBY;
+	atcu.internal = STANDBY;
+	atcu.az_internal = STANDBY;
+	atcu.el_internal = STANDBY;
+
+	/* Update positions */
+	az.cmd_absolute = az.msd_absolute;
+	el.cmd = el.msd;
+
+	PowerOnTimer--;
+
+	// Set this so we can reset PLC in off_state()
+	first_time_in_off_state = 1;
+
+	/* We should see CB4 and CB5 close after a while
+		Put a timer here to check it!
+		Also, check that we are not in simulation mode before turning off
+		7-june/1995
+	*/
+	if ( PowerOnTimer == 0 )
+		atcu.state = OFF_STATE;
+	else
+		if ( az.power_on && el.power_on )
+			atcu.state = STANDBY;
+
+} /* end of powering_sm */
+
+/*
+****************************************************************************
+holding_sm ( )
+
+	DESCRIPTION
+
+	This state is to have the antenna holding a position. What is normally
+done is the last measured antenna position is used as the current holding
+position. WE have a timeout on the time it takes to settle the antenna down.
+This time-out is reset each time we get with the holding region. This is
+merely an extra precaution against a drive or encoder problem.
+
+	HOLDING TIMES
+
+	The holding state has been separated for each axis to cater for the case
+of stowing where one axis may have reached the stow position while the other
+is still driving to the stow position. The az_holding_in_region_time is
+therefore mainly for the benefit of the stopping and stowing tasks.
+
+	It was also necessary to calculate the driving (slewing) time to the
+commanded position. This was to cater for the case when we enter holding 
+state and we find ourselves on the other side of the software limits. An 
+extra few seconds are added for safety. I have also added some percentage of
+the distance to travel as a safety margin to avoid tripping the drives.
+
+	DRIVE IO
+
+	Just a programming note, when writing to the DIO port of the drives, the
+signal levels are always ORed for clarity even though they may be zero.
+	e.g. write_dio_drives ( az_drive, ( run_low | fwdrev_low ) )
+
+	***** LJS 14-10-90
+		CHECK WHETHER THE RESET LINE IS ACTIVE HIGH OR LOW. IF NORMALLY LOW
+		WE WILL HAVE TO INCLUDE RESET_HIGH IN THE WRITE COMMAND.
+	*****
+
+Call:
+	. Called as part of the sequencer state.
+
+Inputs:
+	. Last encoder reading is the "freeze" command.
+
+Outputs:
+	. none.
+
+****************************************************************************
+*/
+static void holding_sm ( ) {
+
+	if ( ( atcu.internal != HOLDING ) && ( atcu.internal != HOLD ) ) {
+		atcu.internal = HOLD;
+		atcu.az_internal = HOLD;
+		atcu.el_internal = HOLD;
+
+		/* Make commanded positions the current measured. */
+		/* First, however, due to the chance that s/w limits have been set 
+		inside our current measured position, clip the HOLDING position
+		to the s/w limit values.
+		*/
+		az.cmd_absolute = az.msd_absolute;
+		az.cmd = az.cmd_absolute ;
+		el.cmd = el.msd;
+
+		command_sw_limit ( );
+
+		/* Reset position controller parameters for smooth changeover */
+		/* I commented these out 30-9-1991 because we do not want to
+		reset filter coefficients here !! LJS
+		*/
+		/* reset_pos_parameters ( AZ_AXIS, az.msd_absolute );
+		reset_pos_parameters ( EL_AXIS, el.msd );
+		*/
+		holding_time_out = HOLDING_TIME;
+		az_holding_in_region_time_out = 0;
+		el_holding_in_region_time_out = 0;
+
+		/* Cater for the case when the S/W limits are less than position */
+		az_holding_time_out =
+				( ( az.msd_absolute - az.cmd_absolute )/MAX_POS_ANTENNA_SPEED_LOAD )
+							+ HOLDING_TIME;
+		el_holding_time_out =
+				( ( el.msd - el.cmd )/MAX_POS_ANTENNA_SPEED_LOAD )
+							+ HOLDING_TIME;
+		}
+
+	/*---- Flag success only if both drives have reached holding */
+	if ( ( atcu.az_internal == HOLDING ) && ( atcu.el_internal == HOLDING ) )
+		atcu.internal = HOLDING;
+
+} /* End of holding_sm */
+
+
+/*
+****************************************************************************
+starting_sm ( )
+
+	This routine does the main sequencing to go through an orderly start-up
+sequence. Most of the items to be carried out here are time dependent. They
+also depend on what the current drive status happens to be. The scheme
+employed here is considered primitive however simplicity was considered to
+be the most robust way of implementing drive sequencing. In a way it also
+helps with readability and changes do not have to span across several tasks
+( if we had decided on using a sequencer based on distributed task control
+).
+	The only potential problem with this scheme is that changes in the
+sampling frequency ( i.e. a different control rate ) will need to be
+reflected in this module. For this reason the increment counts used in this
+procedure have been made definitions to be included in this module. (
+sequenc.h )
+
+Drive Start-Up Sequence: ( Based on SWEO DC Drive )
+
+	This is a state machine for drive starting. It uses the feed-back state
+"drive_state" to drive the machine through the various stages of starting
+the drives.
+
+Call:
+	Only called if atcu is in "starting" state.
+	This routine does not use any of the operational states such as holding
+	but once finished it places the antenna into the holding position.
+
+	N.B. run_high is equivalent to stop_closed !
+
+Inputs:
+	. Carries out state machine for starting drives ( previous states )
+	. Drive signals that indicate state of drive system ( for each axis )
+
+Output:
+	. drive_state ( our feedback mechanism )
+	. atcu.state = holding / standby
+	. atcu.internal
+
+****************************************************************************
+*/
+static void starting_sm ( ) {
+
+	/* Do state machine */
+	switch ( drive_state ) {
+
+		case STANDBY:
+			drive_word = ( stop_closed | poweron );
+
+			atcu.internal = STARTING;
+			atcu.az_internal = STARTING;
+			atcu.el_internal = STARTING;
+
+			drive_state = START_PULSE;
+			starting_pulse_count = 200;
+
+			break;
+
+		case START_PULSE:
+			/* If we time out or the ONs go on goto next
+			state
+			*/
+			drive_word =  ( stop_closed | poweron | start_high );
+
+			if ( ( starting_pulse_count-- < 0 ) ||
+				( az.on_on && el.on_on ) )
+				{
+				drive_word = ( stop_closed | poweron | start_low );
+				drive_state = CHECK_ON;
+
+	/* simulate action of commands & antenna + plc's response here  */
+				if ( get_simulation () )
+					az.on_on = el.on_on = 1 ;
+
+				}
+
+			break;
+
+		case CHECK_ON:
+			if ( ( az.on_on ) && ( el.on_on ) ) {
+				drive_state = DRIVES_ENABLED;
+				}
+			else {
+				error_set ( DRIVE_START_FAILURE_ERR );
+				drive_word = ( stop_open );
+				atcu.state = OFF_STATE;
+				drive_state = STANDBY;
+				}
+			break;
+
+		case DRIVES_ENABLED:			/* N.B. must follow enable_drives */
+			if ( ( az.on_on ) && ( el.on_on ) )
+				atcu.state = HOLDING;
+			else {
+				error_set ( DRIVE_START_FAILURE_ERR );
+				drive_word = ( stop_open );
+				atcu.state = OFF_STATE;
+				drive_state = STANDBY;
+				}
+			break;
+
+		default:
+			drive_state = STANDBY;
+			break;
+
+	} /* switch ( drive_state ) */
+
+} /* End of starting_sm */
+
+/*
+****************************************************************************
+stopping_sm ( )
+
+Merely STOPs antenna by disabling drives (STOP OPEN).
+
+When the STOP is opened the drives will open RUN1 and RUN2. This in turn
+will release the enable lines.
+
+Input:
+	. atcu.internal state. If we are not already holding, then hold.
+
+Output:
+	. atcu.state = STANDBY
+	. atcu.internal = idle
+	. drive_state = STANDBY
+
+****************************************************************************
+*/
+static void stopping_sm ( ) {
+
+	/* Only disable drives when antenna has settled. */
+	/* holding_sm ( ); */
+
+	/* Trip drives */
+	drive_word = ( stop_open | poweron );
+
+	/* simulate action of commands & antenna + plc's response here  */
+	if ( get_simulation () )
+		az.on_on = el.on_on = 0;
+
+	atcu.state = STANDBY;
+	drive_state = STANDBY;
+	atcu.internal = STANDBY;
+	atcu.az_internal = STANDBY;
+	atcu.el_internal = STANDBY;
+
+} /* End of stopping_sm */
+
+
+/*
+****************************************************************************
+stowing_sm ( )
+
+	This is the state machine for the stowing operation. Stowing should be
+allowed from all states except the STANDBY state. It should be possible to
+stop the stowing operation at any time ( unless we are in the depowering
+state ) by issuing a hold or drive-off command.
+
+
+****************************************************************************
+*/
+static void stowing_sm ( ) {
+
+	int return_status;
+
+	/*---- Get Stow positions from NVRAM */
+	return_status = get_stow_positions ( &stow_pos );
+	if ( !return_status ) {
+		error_set ( SEQ_NVRAM_ERR );
+		sequencer_error = 1;
+		}
+
+	switch ( atcu.internal ) {
+
+		case HOLDING:
+			/* Prepare for the holding at stow position */
+			az_holding_time_out = STOWING_TIME;
+			el_holding_time_out = STOWING_TIME;
+
+			az_holding_in_region_time_out = 0;
+			el_holding_in_region_time_out = 0;
+
+			/* These will have to be values set in NVRAM */
+			az.cmd_absolute = stow_pos.az;
+			el.cmd = stow_pos.el;
+
+			atcu.internal = DRIVING_TO_STOW;
+			atcu.az_internal = DRIVING_TO_STOW;
+			atcu.el_internal = DRIVING_TO_STOW;
+
+			break;
+
+		case DRIVING_TO_STOW:
+			/*---- Next State only if both drives have reached holding */
+			if ( ( atcu.az_internal == HOLDING ) && ( atcu.el_internal == HOLDING ) )
+				atcu.internal = STOWED;
+
+			break;
+
+
+		case STOWED:
+			/* Kill drives now we have settled in stow positions */
+			drive_word = ( stop_open );
+			/* simulate action of commands & antenna + plc's response here  */
+			if ( get_simulation () )
+				az.on_on = el.on_on = 0;
+
+			atcu.state = STANDBY;
+			atcu.internal = STANDBY;
+			atcu.az_internal = STANDBY;
+			atcu.el_internal = STANDBY;
+			break;
+
+		default:
+			/* We ensure the Antenna has settled before driving off */
+			if ( ( atcu.az_internal != HOLDING )
+					|| ( atcu.el_internal != HOLDING ) )
+				holding_sm ( );
+			else
+				atcu.internal = HOLDING;
+
+			break;
+
+		} /* switch */
+
+
+} /* End of stowing_sm */
+
+
+/*
+****************************************************************************
+tracking_sm ( )
+
+	This is the state machine for the tracking task. The actual tracking
+algorithm used depends on the ATCU mode. The mode is passed as an argument
+to this routine. The mode should have previously been read by calling task.
+
+****************************************************************************
+*/
+static void tracking_sm ( ) {
+
+		if ( ( atcu.az_internal == HOLD )
+			|| ( atcu.az_internal == HOLDING ) )
+				atcu.az_internal = TRACKING;
+
+		if ( ( atcu.el_internal == HOLD )
+			|| ( atcu.el_internal == HOLDING ) )
+				atcu.el_internal = TRACKING;
+
+		atcu.internal = TRACKING;
+
+		if(atcu.state_summary == TRACKING )
+					cp_data.wrap = SHORTEST_WRAP;
+
+} /* End of tracking_sm */
+
+/*
+****************************************************************************
+scanning_sm ( )
+
+	This is the state machine for the scanning task.
+	Scanning is done in the following steps
+	1) The centre coordinates are set by the latest az/el command
+		from either the positioning sm OR the tracking sm
+	2) Setting the az/el commands to follow a scanning pattern
+		around the centre coordinates
+	3) Depending on whether in POSITION or TRACKING modes,
+		scan again OR goto step (1)
+13/07/95
+For the moment, scanning will only be allowed at 5 deg< elevation <85 deg
+****************************************************************************
+*/
+static void scanning_sm ( ) {
+
+	/* Call the tracking state machine instead if elevation is out of range */
+	/* temporary measure until better solution is done ...... 14/7/95 */
+	/* increase elevation min to 5 due to antenna weight overload */
+	/* az_box_offset el_box_offset  scan_incr defined at top of module */
+	if ( (el.cmd < 5.0) || (el.cmd > 85.0) )
+		tracking_sm ();
+	else {
+	switch ( scan_state )  {
+		case SCAN_INIT:
+			atcu.az_internal = HOLD;
+			atcu.el_internal = HOLD;
+			atcu.internal = HOLDING;
+			az_centre = az.cmd;
+			el_centre = el.cmd;
+			/* Start scanning from top left corner of box */
+			az_offset = -az_box_offset;
+			el_offset = el_box_offset;
+			scan_direction = 1 ;
+			az.cmd = az_centre + az_offset ;
+			el.cmd = el_centre + el_offset ;
+
+			scan_state = SCAN_WAIT;
+			scan_hold_timeout = 100;
+			break;
+
+		case SCAN_WAIT:
+//			if ( atcu.internal == HOLDING ) {
+			scan_hold_timeout-- ;
+			if (( fabs(az.err) < POINT_TOL ) && ( fabs(el.err) < POINT_TOL ))
+			{
+				 scan_state = SCAN_HOLD;
+				 scan_hold_timeout = 15 ; 	/* ?? Is this a one second wait??? */
+			}
+			if ( scan_hold_timeout <= 0 ) {
+				 scan_state = SCAN_NEXT;
+				 scan_hold_timeout = 15 ; 	/* ?? Is this a one second wait??? */
+			}
+
+			break;
+
+		case SCAN_HOLD:
+			scan_hold_timeout-- ;
+			if ( scan_hold_timeout <= 0 )
+				 scan_state = SCAN_NEXT;
+			break;
+
+		case SCAN_NEXT:
+			az_offset += scan_direction* scan_incr ;
+			if ( fabs( az_offset ) > az_box_offset )
+			{
+				scan_direction *= -1 ;	/* change az dirn at box limits */
+				el_offset -= scan_incr ;
+				az_offset += scan_direction* scan_incr ;
+			}
+			/* add increment to offset angle from centre coords */
+			/* LATER ON WILL CHANGE INCREMENT TO relate to THE HPBW  */
+
+			scan_state = SCAN_WAIT;
+			scan_hold_timeout = 100;
+			if ( fabs( el_offset ) <= el_box_offset )
+			{
+				az.cmd = az_centre + az_offset ;
+				el.cmd = el_centre + el_offset ;
+			}
+			else /* Finish scanning when elevation offset is below the box */
+				if ( atcu.mode == POSITION_MODE )
+				{	/* Start scanning from top left corner of box */
+					az_offset = -az_box_offset;
+					el_offset = el_box_offset;
+					scan_direction = 1 ;
+					az.cmd = az_centre + az_offset ;
+					el.cmd = el_centre + el_offset ;
+				}
+				else   /* start scan with new center coords */
+					scan_state = SCAN_INIT;
+
+			break;
+
+		default:
+			break;
+		} /* switch scan_state */
+	}  /* if elevation is ok  */
+} /* End of scanning_sm */
+
+/*
+****************************************************************************
+positioning_sm ( )
+
+	This is the state machine for the positioning state of the ATCU. In this
+state, commands are obtained from the remote computer via the command parser
+task. These commands are the azimuth and elevation positions in degrees.
+
+****************************************************************************
+*/
+static void positioning_sm ( ) {
+
+	/*---- Get the command pos from CP. Do not apply rate offsets until we
+	have reached the position.
+	*/
+	az.cmd = cp_data.az_cmd;
+	el.cmd = cp_data.el_cmd;
+
+	atcu.internal = TRACKING;
+
+	if ( ( atcu.az_internal == SLEWING ) || ( atcu.el_internal == SLEWING ) )
+		atcu.internal = SLEWING;
+
+} /* End of positioning_sm */
+
+/*
+****************************************************************************
+slewing_sm ( )
+
+	This is the state machine to handle the slewing state. In this mode the 
+rates to be applied to the drives are obtained from the operator via the
+command parser. The applied rate should be accelerate/decelerate limited for
+safety and smooth operation. This will be handled by the larger state
+machine.
+
+****************************************************************************
+*/
+static void slewing_sm ( ) {
+
+	/*---- Change internal states to slewing */
+	atcu.az_internal = SLEWING;
+	atcu.el_internal = SLEWING;
+
+	atcu.internal = SLEWING;
+
+	/*---- Get the latest demanded rates */
+	if ( cp_data.az_dem_rate > MAX_POS_ANTENNA_SPEED_LOAD )
+		cp_data.az_dem_rate = MAX_POS_ANTENNA_SPEED_LOAD;
+
+	if ( cp_data.az_dem_rate < MAX_NEG_ANTENNA_SPEED_LOAD )
+		cp_data.az_dem_rate = MAX_NEG_ANTENNA_SPEED_LOAD;
+
+	if ( cp_data.el_dem_rate > MAX_POS_ANTENNA_SPEED_LOAD )
+		cp_data.el_dem_rate = MAX_POS_ANTENNA_SPEED_LOAD;
+
+	if ( cp_data.el_dem_rate < MAX_NEG_ANTENNA_SPEED_LOAD )
+		cp_data.el_dem_rate = MAX_NEG_ANTENNA_SPEED_LOAD;
+
+	/* Convert the demanded rate into demanded position rates */
+	az.cmd_absolute = az.cmd_absolute + cp_data.az_dem_rate * atcu.sample_period;
+	el.cmd = el.cmd + cp_data.el_dem_rate * atcu.sample_period;
+
+} /* End of slewing_sm */
+
+/*
+****************************************************************************
+int arbitrate_commands ( )
+
+	This part of the sequencer must ensure that no command change can occur
+while the last command is in progress. There are circumstances where this
+will be allowed. We will outline these cases below:
+
+
+****************************************************************************
+*/
+int arbitrate_commands ( ) {
+
+	int latest_command, valid_command;
+
+	latest_command = cp_data.cmd;
+	cp_data.cmd = 0;				/* Make it null */
+
+	valid_command = 0;				/* Assume no valid command */
+
+	/*--- Force standby state so commands will not be issued to the state
+		machine while in diagnostic mode.
+	*/
+	switch ( latest_command ) {
+
+			case LIGHTS_ON_CMD:
+			case LIGHTS_OFF_CMD:
+			case DATA_ON_CMD:
+			case DATA_OFF_CMD:
+				valid_command = latest_command;
+				break;
+
+			case POWER_ON_CMD:
+				if ( atcu.state == OFF_STATE )
+					valid_command = latest_command;
+				else
+					error_set ( INVALID_SEQ_COMMAND_ERR );
+
+				break;
+
+			case POWER_OFF_CMD:
+				if ( atcu.state != OFF_STATE )
+					valid_command = latest_command;
+				else
+					error_set ( INVALID_SEQ_COMMAND_ERR );
+
+				break;
+
+			case DRIVE_START_CMD:		/* N.B. Pin MUST Be Out */
+				if ( ( atcu.state == STANDBY ) &&
+							!( ( az.stowpin ) || ( el.stowpin ) ) &&
+							atcu.system_ok )
+					valid_command = latest_command;
+				else
+					error_set ( INVALID_SEQ_COMMAND_ERR );
+
+				break;
+
+			case DRIVE_STOP_CMD:
+				if (( atcu.state != STANDBY ) && (atcu.state != OFF_STATE ))
+					valid_command = latest_command;
+				else
+					error_set ( INVALID_SEQ_COMMAND_ERR );
+
+				break;
+
+			case GO_CMD:
+				if ( ( atcu.state == HOLDING ) ||
+					( atcu.state == POSITIONING ) )
+					valid_command = latest_command;
+				else
+					error_set ( INVALID_SEQ_COMMAND_ERR );
+
+				break;
+
+			case SCAN_ON_CMD:
+				switch ( atcu.state ) {
+					case TRACKING:
+					case POSITIONING:
+						valid_command = latest_command;
+						break;
+
+					default:
+						error_set ( INVALID_SEQ_COMMAND_ERR );
+						break;
+					} /* switch */
+				break;
+
+			case SCAN_OFF_CMD:
+				if ( atcu.state == SCANNING )
+					valid_command = latest_command;
+				else
+					error_set ( INVALID_SEQ_COMMAND_ERR );
+
+				break;
+
+			case HOLD_CMD:
+				switch ( atcu.state ) {
+					case HOLDING:
+					case SLEWING:
+					case TRACKING:
+					case POSITIONING:
+					case STOWING:
+					case SCANNING:
+					case SLEWING_IN_TRACKING:
+					case SLEWING_IN_WAITING:
+					case WAITING_FOR_SOURCE:
+					case SLEWING_IN_POSITION:
+					case DRIVING_TO_STOW:
+						valid_command = latest_command;
+						break;
+
+					default:
+						error_set ( INVALID_SEQ_COMMAND_ERR );
+						break;
+					} /* switch */
+				break;
+
+			case STOW_CMD:
+				if ( ( atcu.state == OFF_STATE ) || ( atcu.state == STANDBY ) )
+					error_set ( INVALID_SEQ_COMMAND_ERR );
+				else {
+					if ( ( atcu.state != STANDBY ) 
+								|| ( atcu.state != STOWING ) )
+						valid_command = latest_command;
+					else
+						error_set ( INVALID_SEQ_COMMAND_ERR );
+
+					if ( atcu.state == STOWING )
+						error_set ( INVALID_SEQ_COMMAND_ERR );
+
+					}
+				break;
+
+			default:
+				/* No new command or new valid command. Will possibly
+				be idle_cmd from parser while changing modes etc.
+				*/
+				break;
+
+			} /* switch latest_command */
+
+	if ( valid_command )
+		atcu.last_cmd = latest_command;
+
+	return ( valid_command );
+
+} /* End of arbitrate_commands */
+
+/*
+============================================================================
+
+					Support Routines
+
+============================================================================
+*/
+
+/*
+***************************************************************************
+command_sw_limit
+
+	Routine to clip commanded angles and flag this in the az and el data
+structures.
+
+Output:
+	az.cmd_clip = true if clipping command
+	el.cmd_clip = true if clipping
+	
+****************************************************************************
+*/
+static void command_sw_limit ( ) {
+
+	if ( az.cmd_absolute > sw_limits.az_cw_limit ) {
+		az.cmd_absolute = sw_limits.az_cw_limit;
+		az.cmd_clip = true;
+		error_set ( AZCMD_CW_LIMIT_ERR );
+		}
+	else
+		if ( az.cmd_absolute < sw_limits.az_ccw_limit ) {
+			az.cmd_absolute = sw_limits.az_ccw_limit;
+			az.cmd_clip = true;
+			error_set ( AZCMD_CCW_LIMIT_ERR );
+			}
+		else
+			az.cmd_clip = false;
+
+	if ( el.cmd > sw_limits.el_up_limit ) {
+		el.cmd = sw_limits.el_up_limit;
+		el.cmd_clip = true;
+		error_set ( ELCMD_UP_LIMIT_ERR );
+		}
+	else
+		if ( el.cmd < sw_limits.el_down_limit ) {
+			el.cmd = sw_limits.el_down_limit;
+			el.cmd_clip = true;
+			error_set ( ELCMD_DOWN_LIMIT_ERR );
+			}
+		else
+			el.cmd_clip = false;
+
+} /* end of command_sw_limit */
+
+/*
+****************************************************************************
+int check_az_sw_limits ( )
+
+	Support routine to check whether we are in the azimuth software limits.
+This routine returns a set code of the current limit status. This is:
+
+				  az_limit
+	CW limit 	= 1
+	CCW limit 	= 2
+	No Limit 	= 0
+
+Inputs:
+	. az_msd
+
+Output:
+	. az_limit = ( 0,1,2 )
+
+	Modified by DJLB 19/5/92 to generate "in-s/w limit" error sets.
+
+****************************************************************************
+*/
+int check_az_sw_limits ( double msd ) {
+
+	int limit;
+
+	limit = 0;
+
+	if( az.cmd_clip && atcu.az_internal == HOLDING )     /* Added by DJLB */
+		{
+	if ( msd > sw_limits.az_cw_limit - HOLDING_ERROR )  /* "- HOLDING_ERROR added by DJLB */
+        {
+		limit = 1;            /* was = sw_limits.az_cw_limit */
+		error_set( AZ_CW_SW_LIMIT_ERR );   /* Added by DJLB */
+	}
+
+	else if ( msd < sw_limits.az_ccw_limit + HOLDING_ERROR )/* "+ HOLDING_ERROR added by DJLB */
+		{
+		limit = 2;            /* was = sw_limits.az_ccw_limit */
+		error_set( AZ_CCW_SW_LIMIT_ERR );  /* Added by DJLB */
+				}
+	}
+
+	return ( limit );
+
+} /* End of check_az_sw_limits */
+
+
+/*
+****************************************************************************
+int check_el_sw_limits ( )
+
+	Support routine to check whether we are in the elimuth software limits.
+This routine returns a set code of the current limit status. This is:
+
+				  el_limit
+	Up limit 	= 1
+	Down limit 	= 2
+	No Limit 	= 0
+
+Inputs:
+	. el_msd
+
+Output:
+	. el_limit = ( 0,1,2 )
+
+	Modified by DJLB 19/5/92 to generate "in-s/w limit" error sets.
+
+
+****************************************************************************
+*/
+int check_el_sw_limits ( double msd ) {
+
+    int limit;
+
+	limit = 0;
+	if( el.cmd_clip && atcu.el_internal == HOLDING )     /* Added by DJLB */
+		{
+
+	if ( msd > sw_limits.el_up_limit - HOLDING_ERROR )  /* "- HOLDING_ERROR added by DJLB */
+		{
+		limit = 1;                /* was = EL_PRELIMIT_UP */
+		error_set( EL_UP_SW_LIMIT_ERR );   /* Added by DJLB */
+		}
+
+
+	else if ( msd < sw_limits.el_down_limit + HOLDING_ERROR )/* "+ HOLDING_ERROR added by DJLB */
+		{
+		limit = 2;                /* was = EL_PRELIMIT_DWN */
+		error_set( EL_DOWN_SW_LIMIT_ERR ); /* Added by DJLB */
+		}
+
+	}
+
+	return ( limit );
+
+} /* End of check_el_sw_limits */
+
+/*
+----------------------------------------------------------------------------
+						  IO Routines
+						  Interfaces to hardware/simulator routines.
+
+----------------------------------------------------------------------------
+*/
+
+/*
+***************************************************************************
+zero_rate_volts
+
+	Routine to zero DACs on both axes.
+
+****************************************************************************
+*/
+void zero_rate_volts ( ) {
+
+	 OutputAzVolts_temp ( 0.0 );
+	 OutputElVolts_temp ( 0.0 );
+
+} /* end of zero_rate_volts */
+
+
+/*
+***************************************************************************
+set_cp_data
+
+	Routine to enable the parser task to input new commands in the
+control point data structure.
+
+Parameters:
+	Pointer to local cp_data structure
+
+No Returns:
+
+****************************************************************************
+*/
+void set_cp_data ( cp_data_struct * cp_data_temp ) {
+
+	disable ( );
+	cp_data = *cp_data_temp;
+	enable ( );
+
+} /* end of set_cp_data */
+
+/*
+***************************************************************************
+return_cp_data ( )
+
+	Routine to return the SEQUENCERS version of the cp_data structure. This
+is used primarily by the screen task for monitoring purposes.
+
+****************************************************************************
+*/
+cp_data_struct return_cp_data ( ) {
+
+	cp_data_struct temp;
+
+	disable ( );
+	temp = cp_data;
+	enable ( );
+
+	return ( temp );
+
+} /* end of return_cp_data */
+
+
+
+/*
+***************************************************************************
+return_azimuth ( )
+
+****************************************************************************
+*/
+axis return_azimuth ( ) {
+
+	axis temp;
+
+	disable ( );
+	temp = az;
+	enable ( );
+
+	return ( temp );
+
+} /* end of return_azimuth */
+
+
+/*
+***************************************************************************
+return_elevation
+
+****************************************************************************
+*/
+axis return_elevation ( ) {
+
+	axis temp;
+
+	disable ( );
+	temp = el;
+	enable ( );
+
+	return ( temp );
+} /* end of return_elevation */
+
+
+/*
+***************************************************************************
+return_atcu
+
+****************************************************************************
+*/
+atcu_struct return_atcu ( ) {
+
+	atcu_struct temp;
+
+	disable ( );
+	temp = atcu;
+	enable ( );
+
+	return ( temp );
+} /* end of return_atcu */
+
+
+/*
+***************************************************************************
+return_az_cmd
+
+****************************************************************************
+*/
+double return_az_cmd ( ) {
+
+	double temp;
+
+	disable ( );
+	temp = az.cmd_absolute;
+	enable ( );
+
+	return ( temp );
+} /* end of return_az_cmd */
+
+
+/*
+***************************************************************************
+return_el_cmd
+
+****************************************************************************
+*/
+double return_el_cmd ( ) {
+
+	double temp;
+
+	disable ( );
+	temp = el.cmd;
+	enable ( );
+
+	return ( temp );
+} /* end of return_el_cmd */
+
+
+/*
+***************************************************************************
+return_az_msd
+
+****************************************************************************
+*/
+double return_az_msd ( ) {
+
+	double temp;
+
+	disable ( );
+	temp = az.msd_absolute;
+	enable ( );
+
+	return ( temp );
+} /* end of return_az_msd */
+
+/*
+***************************************************************************
+return_az_msd_wrap
+
+	Routine to return the Azimuth position in 360deg format as well as wrap
+indication. This routine will normally only be called by the user wanting to
+know the msd position in 0-360 degree format and the wrap status.
+
+****************************************************************************
+*/
+void return_az_msd_wrap ( double * msd, char * msd_wrap ) {
+
+	disable ( );
+	*msd = az.msd;
+	*msd_wrap = az.msd_wrap;
+	enable ( );
+
+} /* end of return_az_msd */
+
+
+/*
+***************************************************************************
+return_el_msd
+
+****************************************************************************
+*/
+double return_el_msd ( ) {
+
+	double temp;
+
+	disable ( );
+	temp = el.msd;
+	enable ( );
+
+	return ( temp );
+}
+
+/*
+***************************************************************************
+return_sequencer_missed_count
+
+	Routine to return the sequencer missed count variable. This variable
+says how many times we counldn't signal the sequencer because of over
+run on the sample period.
+
+****************************************************************************
+*/
+unsigned int return_sequencer_missed_count ( ) {
+
+	unsigned int temp;
+
+	disable ( );
+	temp = sequencer_missed_count;
+	enable ( );
+
+	return ( temp );
+}
+
+/*
+****************************************************************************
+state_summary
+
+	This routine provides a summary of the current state of the ATCU based
+on the actual individual axes states.
+
+	Input is atcu.az_internal, atcu.el_internal, atcu.mode
+	( only relevant for diagnostic, a special case .
+
+	Output is atcu.state_summary (for want of better word)
+
+****************************************************************************
+*/
+unsigned int state_summary ( ) {
+
+	unsigned int state_summary;
+
+	if ( atcu.state == STOWING )
+	{
+		if ( atcu.internal == STOWED )
+			state_summary = END_OF_STOW;
+
+		else
+			state_summary = STOWING;
+	}
+
+	else
+	{
+		if ( ( atcu.az_internal == SLEWING ) ||
+			( atcu.el_internal == SLEWING ) )
+				state_summary = SLEWING;
+
+		else
+			if ( ( atcu.az_internal == SLEWING_IN_POSITION )  ||
+				( atcu.el_internal == SLEWING_IN_POSITION ) )
+					state_summary = SLEWING;
+		else
+			if ( ( atcu.az_internal == SLEWING_IN_TRACKING )  ||
+				( atcu.el_internal == SLEWING_IN_TRACKING ) )
+					state_summary = SLEWING;
+		else
+			if ( ( atcu.az_internal == SLEWING_IN_WAITING )  ||
+				( atcu.el_internal == SLEWING_IN_WAITING ) )
+					state_summary = SLEWING;
+		else
+			if ( ( atcu.az_internal == WAITING_FOR_SOURCE )  ||
+				( atcu.el_internal == WAITING_FOR_SOURCE ) )
+					state_summary = HOLDING;
+		else
+			if ( ( atcu.az_internal == HOLD )  ||
+				( atcu.el_internal == HOLD ) )
+					state_summary = HOLDING;
+		else
+			if ( ( atcu.az_internal == HOLDING )  ||
+				( atcu.el_internal == HOLDING ) )
+					state_summary = HOLDING;
+		else
+			if ( atcu.state_summary == END_OF_STOW )
+				state_summary = END_OF_STOW;
+		else
+			state_summary = atcu.state;
+	}
+
+	return ( state_summary );
+
+} /* end of state_summary */
+
+
+
+/*
+****************************************************************************
+wrap_to_absolute
+
+	Routine to convert commands in 0-360 into a absolute position as
+measured by the encoders.
+
+	There are 3 possible routes.
+		1. SHORTEST
+			In this mode we determine the wrap condition that will give the
+			shortest drive distance.
+
+		2. CCW
+			In this mode we will drive CCW to the demanded position.
+
+		3. CW
+			In this mode we drive CW to the demanded position.
+
+		Note that if the user specifies CW wrap, it is up to the user
+		to know whether this is a sensible direction in the light
+		of the software limit settings and where the antenna is. This
+		is the only way to ensure the user can still enforce control
+		on which way to drive the antenna. Most of the time it
+		is envisaged the user will select shortest.
+
+Notes on setting the commanded angle to obtain the shortest travel.
+	In the case where required wrap is not specified, the angular distance
+	from present to future position is independent of the existing wrap,
+	and is determined by comparing the two angles with both expressed in
+	`0 to 360' deg. terms:-
+		required_delta = cmd360 - msd360
+
+	If the magnitude of this is > 180 deg, the shorter path has a
+	magnitude of 360 - magnitude of required_delta ie
+		magnitude of required_delta = 360 - |cmd360 - msd360|
+
+	and the direction of the change is reversed:-
+		sign_of_required_delta = - sign_of_(cmd360 - msd360)
+
+	thus the new required_delta is:-
+	required_delta = sign_of_required_delta * (360 - |cmd360 - msd360| )
+
+	which works out to be:-
+	required_delta = (cmd360 - msd360) - 360 * sign_of_(cmd360 - msd360)
+
+Parameters:
+	Input: cmd360 is reference in 0-360 degree format
+	Output: cmd in 270 degree format
+
+****************************************************************************
+*/
+static double wrap_to_absolute ( double cmd360 )
+{
+	double  cmd_absolute,
+		msd360,
+		required_delta;
+
+	int	    sign_of_required_delta;
+
+	if ( cp_data.wrap == SHORTEST_WRAP )
+	{
+		msd360 = az.msd_absolute;
+
+	required_delta = cmd360 - msd360;
+
+	if ( fabs(required_delta) > 180 )
+	{
+		if ( required_delta < 0 ) sign_of_required_delta = -1;
+		else sign_of_required_delta = 1;
+
+		required_delta -= 360 * sign_of_required_delta;
+	}
+
+		cmd_absolute = az.msd_absolute + required_delta;
+
+	}
+
+	else
+	{
+	if ( cp_data.wrap == CW_WRAP ) cmd_absolute = cmd360;
+	else cmd_absolute = cmd360 - 360.0;
+	}
+
+	if ( cmd_absolute > sw_limits.az_cw_limit - HOLDING_ERROR )
+		cmd_absolute = cmd_absolute - 360.0;
+	else if ( cmd_absolute < sw_limits.az_ccw_limit + HOLDING_ERROR )
+		cmd_absolute = cmd_absolute + 360.0;
+
+	return ( cmd_absolute );
+
+}  /* end of wrap_to_absolute */
+
+
+
+/*
+****************************************************************************
+absolute
+
+	Routine to convert commands in 0-360 into a absolute position as
++- position suitable for closed loop control code.
+
+	This routine is used for systems where there is no wrap abiguity.
+
+Parameters:
+	Input: cmd360 is reference in 0-360 degree format
+	Output: cmd in +- degree format
+
+****************************************************************************
+*/
+static double absolute ( double cmd360 )
+{
+	double  cmd_absolute;
+
+	if ( cmd360 > 180.0 )
+		cmd_absolute = cmd360 - 360.0;
+	else
+		cmd_absolute = cmd360;
+
+	return ( cmd_absolute );
+
+} /* end of wrap_to_absolute */
+
+
+/*
+****************************************************************************
+open_loop_steps
+
+	Routine to do open loop steps to the drives.
+
+****************************************************************************
+*/
+void open_loop_steps ( ) {
+
+	if ( step_count < systemid.step_per*7.5 ) {
+		el.rate_volts = -systemid.elv;
+		az.rate_volts = -systemid.azv;
+		}
+	else
+		{
+		el.rate_volts = systemid.elv;
+		az.rate_volts = systemid.azv;
+		}
+
+
+	if ( step_count > systemid.step_per*15 )
+		step_count = 0;
+
+	step_count++;
+
+} /* end of open_loop_steps */
+
+
+
+/*
+****************************************************************************
+absolute_to_wrap
+
+	Routine to convert measured positions from absolute to wrapped
+positions. i.e. +-360 to 0-360 and WRAP indication. THis is used mainly for
+indication purposes.
+
+Parameters:
+	Input: absolute position
+
+	Output: msd position (0-360)
+			wrap indication CW_WRAP or CCW_WRAP
+
+****************************************************************************
+*/
+/*static void absolute_to_wrap ( double msd_absolute, double * msd ) {
+
+	if ( msd_absolute < 0 ) {
+		*msd = 360 + msd_absolute;
+		}
+	else
+		{
+		*msd = msd_absolute;
+		}
+
+}*/ /* end of absolute to wrap */
+
+
+
+/*
+****************************************************************************
+signal_watchdog ( )
+
+	This routine merely calls the watch dog routine to reset the
+	watchdog timer.
+
+Parameters:
+	NONE
+
+****************************************************************************
+*/
+static void signal_watchdog ( ) {
+
+	reset_watch_dog ( );
+
+}
+
+/*
+***************************************************************************
+set_default_software_limits
+
+	Routine to set default software limits from values stored in a header
+	file.
+
+Input:
+	Pointer to software_limit_struct
+
+****************************************************************************
+*/
+void set_default_software_limits ( software_limit_struct * sw_l ) {
+
+	sw_l->az_cw_limit = AZ_CW_LIMIT;
+	sw_l->az_ccw_limit = AZ_CCW_LIMIT;
+	sw_l->el_up_limit = EL_UP_LIMIT;  /* Was 95.0 */
+	sw_l->el_down_limit = EL_DOWN_LIMIT; /* Was -5.0 */
+
+} /* end of set_default_software_limits */
+
+/*
+***************************************************************************
+set_default_stow_positions
+
+	Routine to set default stow positions from values stored in a header
+	file.
+
+Input:
+	Pointer to stow_position structure
+
+****************************************************************************
+*/
+void set_default_stow_positions ( stow_pos_struct * stow ) {
+
+	stow->az = AZ_STOW;
+	stow->el = EL_STOW;
+
+} /* end of set_default_software_limits */
+
+
+
+
+/*
+***************************************************************************
+return_systemid
+
+****************************************************************************
+*/
+void return_systemid ( systemid_struct * temp ) {
+
+	disable ( );
+	*temp=systemid;
+	enable ( );
+
+} /* end of return_systemid */
+
+
+/*
+***************************************************************************
+set_systemid
+
+	Routine to set the local copy (sequencer) of system id structure.
+	will be called by tune software.
+
+****************************************************************************
+*/
+void set_systemid ( systemid_struct temp ) {
+												  
+	disable ( );
+	systemid = temp;
+	enable ( );
+
+} /* end of return_systemid */
+
+
+/*
+**************************************************************************
+return_az_rate_volts
+
+	return az control rate in volts
+
+**************************************************************************
+*/
+double return_az_rate_volts ( ) {
+
+	double temp;
+
+	disable ( );
+	temp = az.rate_volts;
+	enable ( );
+
+	return ( temp );
+
+} /* end of return_az_rate_volts */
+
+
+/*
+**************************************************************************
+return_el_rate_volts
+
+	return az control rate in volts
+
+**************************************************************************
+*/
+double return_el_rate_volts ( ) {
+
+	double temp;
+
+	disable ( );
+	temp = el.rate_volts;
+	enable ( );
+
+	return ( temp );
+
+} /* end of return_el_rate_volts */
+
+
+/*
+**************************************************************************
+return_az_speed
+
+	return az control rate
+
+**************************************************************************
+*/
+double return_az_speed ( void ) {
+
+	double temp;
+
+	disable ( );
+	temp = az_speed;
+	enable ( );
+
+	return ( temp );
+
+} /* end of return_az_speed */
+
+/*
+**************************************************************************
+return_el_speed
+
+	return el control rate
+
+**************************************************************************
+*/
+double return_el_speed ( void ) {
+
+	double temp;
+
+	disable ( );
+	temp = el_speed;
+	enable ( );
+
+	return ( temp );
+
+} /* end of return_el_speed */
+
+/*
+**************************************************************************
+return_collect_data
+
+	return the flag that toggles the datafile logging
+
+**************************************************************************
+*/
+unsigned int return_collect_data ( void ) {
+
+	unsigned int temp;
+
+	disable ( );
+	temp = collect_data;
+	enable ( );
+
+	return ( temp );
+
+} /* end of return_el_speed */
+
+
+/*---------------------------- End of sequencer -------------------------*/
+
+CListNode *init_clist(int length)
+{
+int i;
+CListNode *temp1, *temp2, *temp3;
+
+temp1 = (CListNode *) malloc (sizeof(CListNode));
+temp1->d_time=0;
+temp1->Az_Vel = 0;
+temp2 = temp1;
+
+for (i=1; i<length; i++)
+{
+	temp3 = (CListNode *) malloc (sizeof(CListNode));
+	temp3->d_time=0;
+	temp3->Az_Vel = 0;
+	temp2->next = temp3;
+	temp2 = temp3;
+}
+
+temp2->next = temp1;
+return temp1;
+}
+
+CListNode *insert_clist(CListNode *clist, double dt, double vel)
+{
+clist->d_time = dt;
+clist->Az_Vel = vel;
+
+return (clist->next);
+}

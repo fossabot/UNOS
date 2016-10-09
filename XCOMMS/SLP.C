@@ -1,0 +1,508 @@
+/* **************************************************************************
+** SLP.c
+**
+** Packet type Desc
+**   0  PING  packet (respond with PONG packet)
+**   1  DATA  packet
+**   2  ACK   packet
+**   3  RT    packet
+**   4  PONG  packet
+**   5  SYNC1 packet  (listen to multiple SYNC1s until we get a ping)
+**   6  SYNC2 packet  (sync all (sent and received) ids to 0,
+**												last received to 255)
+**   7-255  not implemented
+**
+** Data Packet. Each bracket represents one byte
+** (packettype)(numofdatabytes)(data)(data)....(data)(CRC)(CRC)
+**
+** Statistics
+** it takes 0.12 second for the other side to respond to a packet with
+** an ACK. If we take away 80 bytes per packet(~80ms) it is about 40ms
+** for the other side to respond.
+** *****************************************************************************
+*/
+
+#include <stdio.h>
+#include <string.h>
+#include <dos.h>
+#include "queue.h"
+#include "general.h"
+#include "unos.h"
+#include "main_ext.h"   //define LOG_TASK
+
+#include "taskname.h"
+
+/* rjlov */
+#include "serinfo.h"
+
+#define LINEDOWNTIMEOUT 5.0
+
+#define SER_PING 0
+#define SER_DATA 1
+#define SER_ACK 2
+#define SER_RT 3
+#define SER_PONG 4
+#define SER_SYNC1 5
+#define SER_SYNC2 6
+
+queueclass outqueue(666),inqueue(666),fromserialqueue(666); // in queue.c
+
+/*
+
+typedef struct	{
+		BOOLEAN irig_time_status;
+		BYTE hundredths;
+		BYTE seconds;
+		BYTE minutes;
+		BYTE hours;
+		BYTE dayofmonth;
+		BYTE month;
+		BYTE year;
+		BYTE century;
+
+				} TimeRecord;
+
+*/
+
+extern struct timestruct // in rclock.c
+{
+	 int year;
+	 int month;
+	 int day;
+	 int hour;
+	 int minute;
+	 int second;
+	 int hund;
+	 float fsec;
+	 double djsec;
+} currtime;
+
+static unsigned int crctable[256]={
+0x0000,0xd801,0xf001,0x2800,0xa001,0x7800,0x5000,0x8801,
+0xc0c1,0x18c0,0x30c0,0xe8c1,0x60c0,0xb8c1,0x90c1,0x48c0,
+0xc181,0x1980,0x3180,0xe981,0x6180,0xb981,0x9181,0x4980,
+0x0140,0xd941,0xf141,0x2940,0xa141,0x7940,0x5140,0x8941,
+0xc301,0x1b00,0x3300,0xeb01,0x6300,0xbb01,0x9301,0x4b00,
+0x03c0,0xdbc1,0xf3c1,0x2bc0,0xa3c1,0x7bc0,0x53c0,0x8bc1,
+0x0280,0xda81,0xf281,0x2a80,0xa281,0x7a80,0x5280,0x8a81,
+0xc241,0x1a40,0x3240,0xea41,0x6240,0xba41,0x9241,0x4a40,
+0xc601,0x1e00,0x3600,0xee01,0x6600,0xbe01,0x9601,0x4e00,
+0x06c0,0xdec1,0xf6c1,0x2ec0,0xa6c1,0x7ec0,0x56c0,0x8ec1,
+0x0780,0xdf81,0xf781,0x2f80,0xa78a,0x7f80,0x5780,0x8f81,
+0xc741,0x1f40,0x3740,0xef41,0x6740,0xbf41,0x9741,0x4f40,
+0x0500,0xdd01,0xf501,0x2d00,0xa501,0x7d00,0x5500,0x8d01,
+0xc5c1,0x1dc0,0x35c0,0xedc1,0x65c0,0xbdc1,0x95c1,0x4dc0,
+0xc481,0x1c80,0x3480,0xec81,0x6480,0xbc81,0x9481,0x4c80,
+0x0440,0xdc41,0xf441,0x2c40,0xa441,0x7c40,0x5440,0x8c41,
+0xcc01,0x1400,0x3c00,0xe401,0x6c00,0xb401,0x9c01,0x4400,
+0x0cc0,0xd4c1,0xfcc1,0x24c0,0xacc1,0x74c0,0x5cc0,0x84c1,
+0x0d80,0xd581,0xfd81,0x2580,0xad81,0x7580,0x5d80,0x8581,
+0xcd41,0x1540,0x3d40,0xe541,0x6d40,0xb541,0x9d41,0x4540,
+0x0f00,0xd701,0xff01,0x2700,0xaf01,0x7700,0x5f00,0x8701,
+0xcfc1,0x17c0,0x3fc0,0xe7c1,0x6fc0,0xbfc1,0x9fc1,0x47c0,
+0xce81,0x1680,0x3e80,0xe681,0x6e80,0xb681,0x9e81,0x4680,
+0x0e40,0xd641,0xfe41,0x2640,0xae41,0x7640,0x5e40,0x8641,
+0x0a00,0xd201,0xfa01,0x2200,0xaa01,0x7200,0x5a00,0x8201,
+0xcac1,0x12c0,0x3ac0,0xe2c1,0x6ac0,0xb2c1,0x9ac1,0x42c0,
+0xcb81,0x1380,0x3b80,0xe381,0x6b80,0xb381,0x9b81,0x4380,
+0x0b40,0xd341,0xfb41,0x2340,0xab41,0x7340,0x5b40,0x8341,
+0xc901,0x1100,0x3900,0xe101,0x6900,0xb101,0x9901,0x4100,
+0x09c0,0xd1c1,0xf9c1,0x21c0,0xa9c1,0x71c0,0x59c0,0x81c1,
+0x0880,0xd081,0xf881,0x2080,0xa881,0x7080,0x5880,0x8081,
+0xc841,0x1040,0x3840,0xe041,0x6840,0xb041,0x9841,0x4040 };
+
+// global variable     -  made these static 18/sep - sto
+static int rtcounter=0;
+static int crccounter=0;
+static int tocounter=0;
+static int juststartedRTACflag = 1;
+static unsigned int slp_ctr = 0;
+
+ser_struct serinfo;
+
+unsigned int calcCRC(char *str,unsigned int strlen)
+{
+	unsigned int crcreg,i;
+	unsigned char t;
+	crcreg=0;
+	for (i=0;i<strlen;i++)
+	{
+	t= (unsigned char) (crcreg >> 8);         /* crcreg div 256 */
+	t=str[i] ^ t;
+	crcreg=crcreg << 8;   /* left shift  */
+	crcreg=crcreg ^ crctable[t];
+	} /* end while */
+	return crcreg;
+}
+
+unsigned char bitchecker(unsigned char a,unsigned char b,unsigned char c)
+{ unsigned char bit[8];
+	unsigned char result;
+	int i;
+
+	bit[0]=1;
+	bit[1]=2;
+	bit[2]=4;
+	bit[3]=8;
+	bit[4]=16;
+	bit[5]=32;
+	bit[6]=64;
+	bit[7]=128;
+
+	result=0;
+	for (i=0;i<8;i++)
+	{
+		if ((a & bit[i]) && (b & bit[i])) result=result+bit[i];
+		else if ((a & bit[i]) && (c & bit[i])) result=result+bit[i];
+				 else if ((b & bit[i]) && (c & bit[i])) result=result+bit[i];
+	}
+
+	return (result);
+}
+
+unsigned char getbyte(void) // gets a byte from the serial line
+{ unsigned char temp;       // also see protocol.c
+	double timestamp;
+	int timeout=0,loop=1;
+
+	unsigned char mess_buf[80];
+	unsigned int mess_lgth;
+
+	timestamp=currtime.djsec;   // get timestamp
+	do
+	{
+	  if (currtime.djsec > timestamp + 2.0)
+		timeout=1; loop=0;  // if timeout
+	  if (fromserialqueue.isnotempty()) loop=0; // if byte is avail from serial line
+	  if (loop)  rcv_mess (mess_buf, &mess_lgth, 1); // else give up time slice
+	} while (loop);
+
+	if (timeout) temp=0; // if timeout assume byte is zero (NEEDS TO BE CHANGED)
+	else
+	  temp=fromserialqueue.dequeue(); // get byte from serial line
+
+	serinfo.lastbyte = temp;
+	return (temp);
+}
+
+void init_slp_task (void) {
+;
+}
+
+void slp_task (void* dummy)  // Serial Line (Error Correction) Protocol
+{
+	unsigned char mess_buf[80];
+	unsigned int mess_lgth;
+	char *rtn_addr_ptr;
+
+	// TO == timeout     ACK==acknowledge
+	// RT == retransmit  WACK== waiting for ACK
+	int i,TO=0,ACK=0,RT=0,WACK=0,j,k;
+	unsigned char packetout[258],packetin[258], tempbuff[20];
+	unsigned int CRC,CRCIN,datasizeout,datasizein,*uiptr;
+	unsigned char p1,p2,p3,d1,d2,d3,i1,i2,i3,circlist[3];
+	double tsend,timenow;
+	double acktimeout=3.0; // one second timeout
+	double lastpackettimestamp=0.0; // the last time a packet was received
+	unsigned char packettype,temp;
+	unsigned char lastpsendid=255,currpsendid=0,lastpreceivedid=255,
+		nextrecid=0,packetid;
+	FILE *fp;
+
+	datasizeout = 0;
+
+	dummy = dummy;
+	serinfo.nummesgs = 14;
+
+	while ( 1 ) // forever
+	{
+		/* rjlov */
+#if LOG_TASK
+		fp = get_fileptr ( );
+		fwrite((const char *)"L",1,1,fp);
+#endif
+
+		slp_ctr++;
+
+		// just a timer!!
+		 rtn_addr_ptr = rcv_mess (mess_buf, &mess_lgth, 1);
+		 rtn_addr_ptr = rtn_addr_ptr;
+
+		 // state 0
+		 ACK=ACK;  // dummy statement
+		 if (RT || TO)  // if RETRANSMIT or TIMEOUT
+		 { // send packet to the serial line
+			 ACK=0; RT=0; TO=0; WACK=1; // set waiting for ACK
+			 send_mess(packetout,datasizeout+11, ch_0_tx );
+			 tsend=currtime.djsec; // get timestamp
+		 }
+		 else
+		 if (outqueue.isnotempty() && !WACK) // if data to send out & not WACK
+		 { datasizeout=outqueue.queuesize();
+			 for(i=0;i<datasizeout;i++)
+			 { packetout[i+9]=outqueue.dequeue();
+			 }
+
+			 // calc and put CRC into packet
+			 CRC=calcCRC((packetout+9),datasizeout);
+			 uiptr=&CRC;
+			 *(packetout+9+datasizeout+0)=*((char *)uiptr+0);
+			 *(packetout+9+datasizeout+1)=*((char *)uiptr+1);
+
+			 // put packet type description
+			 packetout[0]=SER_DATA;
+			 packetout[1]=SER_DATA;
+			 packetout[2]=SER_DATA;
+			 // put num of bytes description
+			 packetout[3]= (unsigned char) datasizeout;
+			 packetout[4]= (unsigned char) datasizeout;
+			 packetout[5]= (unsigned char) datasizeout;
+
+			 // put packetid description
+			 packetout[6]= currpsendid;
+			 packetout[7]= currpsendid;
+			 packetout[8]= currpsendid;
+
+			 // send packet across the line;
+			 send_mess(packetout,datasizeout+11,ch_0_tx);
+			 tsend=currtime.djsec; // get timestamp
+			 ACK=0; RT=0; TO=0; WACK=1; // set Waiting for ACK flag
+		 } // endif queue is not empty
+
+		 ACK=0; RT=0; TO=0;
+
+		 timenow=currtime.djsec;  // get time
+			 if ( (timenow - tsend) > acktimeout ) // if acktimeout
+			 { if (WACK)              // and waiting for ACK then set TO flag
+				 { tocounter++; TO=1;
+					 if ( (juststartedRTACflag==0) && // if timeout forty times
+								(tocounter>=40)
+							)
+					 { // linedown
+						 tocounter=0; // reset timeout counter
+						 WACK=0;      // reset WACK
+						 //ESTOP=1; // set the emergency stop flag
+						 juststartedRTACflag=1; // reset the just started flag
+					 }
+
+				 } // endif (WACK)
+			 } // endif ( (timenow - tsend) > acktimeout )
+			 if (fromserialqueue.isnotempty()) // if data from serial line
+			 {   p1=getbyte(); // get packettype
+				 p2=getbyte(); // get packettype
+				 p3=getbyte(); // get packettype
+
+				 packettype=bitchecker(p1,p2,p3);
+
+				 serinfo.lastbyte = packettype;
+
+				 if (packettype== SER_PING) // a PING packet
+				 {
+				 /* temp=4;
+				 */
+				 temp=SER_PONG;
+
+					 send_mess(&temp,1,ch_0_tx);// send PONG
+					 send_mess(&temp,1,ch_0_tx);// send PONG
+					 send_mess(&temp,1,ch_0_tx);// send PONG
+
+				 }
+				 else if (packettype== SER_DATA) // a DATA packet is coming in
+				 {
+						d1= getbyte(); // get numofdatabytes
+						d2= getbyte(); // get numofdatabytes
+						d3= getbyte(); // get numofdatabytes
+
+						datasizein=bitchecker(d1,d2,d3);
+
+						i1= getbyte(); // get packet id
+						i2= getbyte(); // get packet id
+						i3= getbyte(); // get packet id
+
+						packetid=bitchecker ( i1, i2, i3 );
+
+						// get numofdatabytes
+						for(i=0;i<datasizein;i++)
+						{ packetin[i]= getbyte();  // get actual data
+						} // end for
+						uiptr=&CRCIN;
+
+						/* rjlov */
+						serinfo.crcin1 = getbyte();
+						serinfo.crcin2 = getbyte();
+
+						k = serinfo.mesgidx = (serinfo.mesgidx + 1) % serinfo.nummesgs;
+
+						strcpy(serinfo.mesg[k],"Serial Packet ");
+						for(j=0;j<i;++j) {
+							sprintf(tempbuff,"%2x ",packetin[j]);
+							strcat(serinfo.mesg[k],tempbuff);
+						}
+						sprintf(tempbuff,"%2x %2x",serinfo.crcin1,serinfo.crcin2);
+						strcat(serinfo.mesg[k],tempbuff);
+
+						*((unsigned char *)uiptr)=serinfo.crcin1;
+						*(((unsigned char *)uiptr)+1)=serinfo.crcin2;
+
+						CRC=calcCRC(packetin,datasizein); // calc CRC for data
+
+						/* rjlov */
+						serinfo.crccalc1 = *(unsigned char *)&CRC;
+						serinfo.crccalc2 = *(((unsigned char *)&CRC) + 1);
+						serinfo.inid = packetid;
+						serinfo.lastinid = lastpreceivedid;
+						serinfo.nextinid = nextrecid;
+						serinfo.insize = datasizein;
+
+						if (packetid==lastpreceivedid)
+						{ /* ignore it, dont received the same packet twice */
+							temp= SER_ACK; // send ACK but ignore data received
+							send_mess(&temp,1,ch_0_tx);
+							send_mess(&temp,1,ch_0_tx);
+							send_mess(&temp,1,ch_0_tx);
+							send_mess(&packetid,1,ch_0_tx);
+							send_mess(&packetid,1,ch_0_tx);
+							send_mess(&packetid,1,ch_0_tx);
+						}
+						else // packetid <> lastpreceivedid
+						{
+							if (CRC==CRCIN) // if CRC is correct
+							{
+								temp = SER_ACK; // send ACK
+								send_mess( &temp, 1, ch_0_tx);
+								send_mess( &temp, 1, ch_0_tx);
+								send_mess( &temp, 1, ch_0_tx);
+								send_mess( &packetid, 1, ch_0_tx);
+								send_mess( &packetid, 1, ch_0_tx);
+								send_mess( &packetid, 1, ch_0_tx);
+
+								k = serinfo.mesgidx = (serinfo.mesgidx + 1) % serinfo.nummesgs;
+								sprintf(serinfo.mesg[k],"Sent ACK for %d",packetid);
+
+								// put data in a received queue
+								lastpackettimestamp = currtime.djsec;
+
+								// time stamp it
+								if (juststartedRTACflag) juststartedRTACflag=0;
+
+								for(i=0;i<datasizein;i++) {
+									inqueue.enqueue(packetin[i]);
+									}
+
+								nextrecid=(packetid + 1)%250;
+								lastpreceivedid=packetid; // last packet received id
+/*
+								send_mess(&temp,1,chDecoderTaskName);
+*/
+							}
+							else // if CRC is wrong ie data corruption
+							{
+								temp=SER_RT; crccounter++;
+								// Send Retransmit
+
+								send_mess(&temp,1,ch_0_tx);
+								send_mess(&temp,1,ch_0_tx);
+								send_mess(&temp,1,ch_0_tx);
+								send_mess(&packetid,1,ch_0_tx);
+								send_mess(&packetid,1,ch_0_tx);
+								send_mess(&packetid,1,ch_0_tx);
+								k = serinfo.mesgidx = (serinfo.mesgidx + 1) % serinfo.nummesgs;
+								sprintf(serinfo.mesg[k],"Sent RT for %d",packetid);
+							}
+					 } // end else packet <> lastpreceivedid
+				 } // end if (packettype==1)
+				 else if (packettype==SER_ACK) // if ACK comes in
+				 {  i1= getbyte(); i2= getbyte(); i3= getbyte();
+						// get packet id
+						packetid=bitchecker(i1,i2,i3);
+						if (WACK && (packetid==currpsendid) )
+						{
+							ACK=1; WACK=0; RT=0; TO=0;
+							lastpsendid=currpsendid;
+							lastpsendid=lastpsendid; // dummy statement
+							currpsendid= ++currpsendid % 250;
+						}
+						else { /* ignore it */ }
+				 }
+				 else if (packettype==SER_RT) // if retransmit comes in
+				 {  i1= getbyte(); i2= getbyte(); i3= getbyte();
+						// get packet id
+						packetid=bitchecker(i1,i2,i3);
+						if (WACK && (packetid==currpsendid) )
+						{ rtcounter++; WACK=1; ACK=0; RT=1; TO=0;}
+						else { /* ignore it */ }
+				 }
+				 else if (packettype==SER_PONG) // if PONG packet comes in
+				 { // to be implemented later
+				 }
+				 else if (packettype==SER_SYNC2) // if SYNC2 packet comes in
+				 {
+						/* resync all packet ids so that both ends are the same */
+						lastpsendid=255;
+						lastpreceivedid=255;
+						nextrecid=0;
+						currpsendid=0;
+				 }
+				 else if (packettype==SER_SYNC1) // if SYNC1 sequence comes in
+				 {
+						k = serinfo.mesgidx = (serinfo.mesgidx + 1) % serinfo.nummesgs;
+						strcpy(serinfo.mesg[k],"Got SYNC1");
+
+						/* initialise circlist to be all SER_SYNC1 bytes */
+						for(i=0;i<3;++i)
+							circlist[i] = SER_SYNC1;
+
+						/* Eat up bytes from the serial line until we get three
+						** SYNC2s in a row */
+						for(i=0;
+								circlist[i] != SER_SYNC2;
+								i=((i+1)%3))
+							circlist[i] = getbyte();
+
+						if (bitchecker(circlist[0],circlist[1],circlist[2]) == SER_SYNC2)
+						{
+							k = serinfo.mesgidx = (serinfo.mesgidx + 1) % serinfo.nummesgs;
+							strcpy(serinfo.mesg[k],"Got SYNC2");
+
+							temp=SER_SYNC1;
+							send_mess(&temp,1,ch_0_tx);// send SYNC1
+							send_mess(&temp,1,ch_0_tx);// send SYNC1
+							send_mess(&temp,1,ch_0_tx);// send SYNC1
+							temp=SER_SYNC2;
+							send_mess(&temp,1,ch_0_tx);// send SYNC2
+							send_mess(&temp,1,ch_0_tx);// send SYNC2
+							send_mess(&temp,1,ch_0_tx);// send SYNC2
+
+							k = serinfo.mesgidx = (serinfo.mesgidx + 1) % serinfo.nummesgs;
+							strcpy(serinfo.mesg[k],"Sent SYNC1, SYNC2");
+						}
+
+				 }   /* end of if SYNC1 sequence */
+
+			 } // endif (fromserialqueue.isnotempty())
+
+	// now do a line down check
+	if ( (juststartedRTACflag==0) &&
+			 (lastpackettimestamp + LINEDOWNTIMEOUT < currtime.djsec )
+		 )
+	{ // linedown therefore shutdown the RTAC program
+		tocounter=0; // reset timeout counter
+		WACK=0; //reset WACK
+		//ESTOP=1; // set the emergency stop flag
+		juststartedRTACflag=1; // reset the just started flag
+	}
+
+	} // for (;;)
+} /* end of slp */
+
+
+unsigned int return_slp_ctr( void )
+{
+	unsigned int temp;
+
+	disable ();
+	temp = slp_ctr;
+	enable ();
+
+	return (temp);
+}

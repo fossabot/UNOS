@@ -1,0 +1,232 @@
+
+/****************************************************************************
+					Antenna Tracking Control Unit
+
+						Screen for PC
+
+_author: L. J. Sciacca
+
+*****************************************************************************/
+
+/*
+MODULE DESCRIPTION
+------------------
+
+	This module contains the screen task for the ATCU. It was decided rather 
+than have several tasks trying to get access to the one screen, that one
+task would be the sole user of the screen. This would avoid potential
+problems with blocked semaphores stopping a task from running for excessive 
+periods. Writing to the screen takes several milliseconds (in fact for a lot 
+of updates may be >20-50ms).
+
+	To use this task, the user should first design, layout, and create a 
+routine that will write to the screen, using cprintf's and gotoxy routines
+the information they require. Alternatively, there is a pcscreen module with
+routines that will write text to screen, draw boxes, and write floating 
+point numbers or integers to the screen. This can be found in pcscreen.c.
+
+	Simply add your screen (page) to the task below, e.g.
+		display_mystuff ( );
+
+	The routine should do the following to enable swapping between pages via 
+the keyboard entry.
+
+	init_my_page ( );
+
+	e.g.
+	pcscr_put_text ( 10, 1, 
+			"Antenna Tracking Control Unit Maintenance Panel - TUNRA IED 1990", BOLD );
+
+	pcscr_draw_box ( 1, 2, 38, 19, NULL );
+
+	pcscr_put_text ( 3, 3, "  Antenna Tracking Control Unit", BOLD );
+	pcscr_put_text ( 6, 4, "Azimuth          Elevation", NORMAL );
+
+
+		timed_wait ( UPDATE_SCREEN_SEM, 1 );
+
+		....do the screen stuff....
+
+	MY_PAGE is a definition defined in kbtask.h
+
+	The reason this was done was because the beyboard task toggles thru the
+pages and sets which one is being used.
+*/
+#include <stdio.h>
+#include <conio.h>
+#include <dos.h>
+#include <string.h>
+
+#include "unos.h"
+#include "general.h"
+
+#include "screen.h"
+#include "seqscr.h"
+#include "tunescr.h"	/* display_tune () */
+#include "credit.h"		/* display_credit() ksc/tzqh */
+#include "trackscr.h"		/* display_track() ksc/tzqh */
+
+/* rjlov */
+extern void PLC_Screen ( void );
+extern void display_serial ( void );
+
+/* ksc/tzqh 22/8/96 */
+extern void display_credit ( void );
+extern void display_track (void);
+
+#include "main_ext.h"
+#include "kbtask.h"
+#include "pcscr.h"		/* Import display_*/
+
+/* Function key map    */
+
+/* The hash definitions in kbtask.h should be the same order as
+	 the folllowing keys or they may not appear in order
+
+	 Need to change definitions in kbtash.h if these are changed ksc 13/7/96*/
+static char * farr []={ "MAIN",
+												"PLC",
+												"TUNE",
+												"IO",
+												"GRAPH",
+												"TRACK",
+												"CREDIT"};
+
+
+/* Screen sempahore */
+static unsigned int screen_sem;
+static unsigned int update_screen_sem;
+
+/*
+****************************************************************************
+display_function_keys ( )
+
+Routine to display function menu at the bottom of the screen.
+
+****************************************************************************
+*/
+void display_function_keys ( ) {
+
+	pcscr_function_menu (7, farr );   /* 7 means that there are 7 menu pages */
+
+} // end of display_function_keys
+
+/*
+****************************************************************************
+protect_screen ()
+
+Routine to protect writes to screen
+
+****************************************************************************
+*/
+void protect_screen ( ) {
+
+	wait ( screen_sem );
+
+} // end of protect_screen
+
+/*
+****************************************************************************
+unprotect_screen ()
+
+Routine to unprotect writes to screen
+
+****************************************************************************
+*/
+void unprotect_screen ( ) {
+
+	_signal ( screen_sem );
+
+} // end of protect_screen
+
+/*
+****************************************************************************
+update_screen ()
+
+Routine to wake up screen task and put it back to sleep.
+
+****************************************************************************
+*/
+void update_screen ( unsigned int time )
+{
+	timed_wait ( update_screen_sem, time );
+}
+
+/*
+****************************************************************************
+screen_task ( )
+
+	Task to display current parameters and accept keyboard input for command
+parser. This task can be modified to display different windows of data. This
+will enable other screens such as special diagnostic, Orbit track, NORAD,
+and start track screen along side the atcu screen.
+
+	To use the screen, a user must write their own screen routines
+(alternatively use the scransi routines which provide boxes, BOLD etc) and
+have an inner loop that may use the update_screen_sem semaphore in a timed
+wait for slower updates.
+
+****************************************************************************
+*/
+void screen_task ( void * Dummy ) {
+
+	enable ( );
+	Dummy = Dummy;
+
+	/* set_screen_page( ATCU_PAGE ); */
+	/* We should flag an error here that UNOS couldnt get semaphores */
+	if ((screen_sem = create_semaphore ()) != 0xffff)
+		init_semaphore (screen_sem, 1, 1 );
+
+	if ((update_screen_sem = create_semaphore ()) != 0xffff)
+		init_semaphore (update_screen_sem, 0, 1 );
+
+	init_con_parameters ();      /* routine to initialise the nvram parameters */
+
+	/* Infinite task loop */
+	while ( 1 ) {
+		switch(return_screen_page())
+			{
+			case ATCU_PAGE:
+				/* Status - F1 */
+				display_atcu ( );
+				break;
+
+			case PLC_PAGE:
+				PLC_Screen ( );
+				break;
+
+			case TUNE_PAGE:
+				display_tune ( );
+				break;
+
+			case IO_PAGE:
+				/* rjlov */
+				display_serial( );
+				break;
+
+			case GRAPH_PAGE:
+				display_graph();
+				break;
+
+			case TRACK_PAGE:
+				display_track();
+				break;
+
+			case CREDIT_PAGE:
+				display_credit();
+				break;
+
+			default:
+				display_atcu ();
+				break;
+			}
+
+	} /* while ( 1 ) */
+
+} /* end of screen_task
+ */
+
+
+
+/*-------------------------- End of screen module -----------------------*/

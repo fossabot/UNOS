@@ -1,0 +1,155 @@
+/************************************************************************/
+/*                                                                      */
+/*                                                                      */
+/*                                                                      */
+/*                SERIAL DEVICE DRIVER INITIALISATION MODULE            */
+/*                                                                      */
+/*                                   by                                 */
+/*                                                                      */
+/*                               Robert Betz                            */
+/*            Department of Electrical and Computer Engineering         */
+/*                          University of Newcastle                     */
+/*                    (Copyright 1988, 1989, 1990, 1992)                */
+/*                                                                      */
+/*                                                                      */
+/*                                                                      */
+/************************************************************************/
+
+/*
+
+DESCRIPTION
+
+This module calls the serial channel creation routine for all the serial
+channels that need to be created in the system.
+
+*/
+
+#include <dos.h>
+#include "general.h"
+//#include "alarmnum.h"
+#include "serinit.h"
+#include "serial.h"
+#include "taskname.h"
+
+/************************
+*** NOTE TO ALL WHO COME THIS WAY
+*** THE INTERRUPT NUMBER SPECIFIED HERE
+*** SHOULD BE THE IRQ SPECIFIED ON THE
+*** SERIAL CARD, PLUS 8. THIS IS
+*** RATHER IMPORTANT.
+*** Also note, you have to change the PIC mask below!
+*** should be set to ~(1<<IRQNUM) ( ie IRQ 5 = 0xdf, IRQ 3 = 0xf7)
+************************
+
+if IRQ=3, then it should be set as 0x0b
+	since 3+8=11 and 11 = b(h)
+
+if IRQ=5, then it should be set as 0x0d
+*/
+
+#define CHANNEL_1_INTR_NUM 0x0d     /* really irq 3 */
+#define UART1_COM_REG_ADDR 0x340	/* linux box channel */
+#define UART1_DATA_REG_ADDR 0x340
+#define NO_DIVISION_RATIO 0
+
+#define CHANNEL_2_INTR_NUM 0x0f     /* really irq 7 */
+#define UART2_COM_REG_ADDR 0x320	/* plc serial channel */
+#define UART2_DATA_REG_ADDR 0x320
+
+#define CHANNEL_1_RX_BUF_SIZE 350
+#define CHANNEL_1_TX_BUF_SIZE 350
+
+#define CHANNEL_1_BUF_LOW_LIM 10
+#define CHANNEL_1_BUF_UPPER_LIM (CHANNEL_1_RX_BUF_SIZE - 20)
+
+#define CHANNEL_1_MBX_MESS_SIZE 350
+#define CHANNEL_1_MBX_Q_SIZE 10
+
+#define CHANNEL_2_RX_BUF_SIZE 350
+#define CHANNEL_2_TX_BUF_SIZE 350
+
+#define CHANNEL_2_BUF_LOW_LIM 10
+#define CHANNEL_2_BUF_UPPER_LIM (CHANNEL_1_RX_BUF_SIZE - 20)
+
+#define CHANNEL_2_MBX_MESS_SIZE 350
+#define CHANNEL_2_MBX_Q_SIZE 10
+
+
+#define ONE_8259 1
+#define MASTER_8259_ADDR 0x20
+#define SLAVE_8259_ADDR 0xa0
+
+#define TX_ENABLE_DISABLE_BIT 0x02
+					/* For the 16450 uart */
+
+#define INTR_CTRL_REG_OFFSET 1
+					/* Interrupt control register offset for the 16450 */
+
+
+#define NOXONXOFF 0
+				  // define xonxoff flag
+/*-----------------------------------------------------------------------*/
+
+
+
+
+/*
+==========================================================================
+|
+| fintSerialChannelInitialise
+|
+| This function is called during system start up and its purpose is to
+| initialise the serial channels that are required in the system. If the
+| set up of the channels is successful then the function returns a
+| TRUE value, else it returns a FALSE.
+|
+| Parameters	:	- none
+|
+| Returns		:	- TRUE if the operation is successful.
+|					- FALSE if the operation is not successful
+|
+==========================================================================
+*/
+
+int fintSerialChannelInitialise (void) {
+
+	/* Create the first serial channel */
+	// For server system
+	if (create_serial_channel (NS16450, BAUD_9600, ONE_STOP_BIT,
+		EIGHT_DATA_BITS, NO_PARITY, UART1_COM_REG_ADDR, UART1_DATA_REG_ADDR,
+		NO_DIVISION_RATIO, CHANNEL_1_INTR_NUM,
+		CHANNEL_1_INTR_NUM, TX_ENABLE_DISABLE_BIT,
+		INTR_CTRL_REG_OFFSET, CHANNEL_1_RX_BUF_SIZE,
+		CHANNEL_1_TX_BUF_SIZE, CHANNEL_1_BUF_LOW_LIM,
+		CHANNEL_1_BUF_UPPER_LIM, CHANNEL_1_MBX_Q_SIZE,
+		CHANNEL_1_MBX_MESS_SIZE, ONE_8259, MASTER_8259_ADDR, SLAVE_8259_ADDR,
+		ch_0_rx, ch_0_tx, NULL, NULL, PRIORITY_2, PRIORITY_2, NOXONXOFF) == FALSE) {
+		return (FALSE);
+	} /* if */
+	else {
+		/* unmask the interrupt for the COM1 interrupt */
+		/* see notes at top of file */
+		outportb (0x0021, inportb(0x0021) & ~(1<<(CHANNEL_1_INTR_NUM-8)));
+	} /* else */
+
+	/* Now create the second serial channel */
+	// Set up for PLC RS422 comms, seven bit, even parity
+	if (create_serial_channel (NS16450, BAUD_9600, ONE_STOP_BIT,
+		SEVEN_DATA_BITS, EVEN_PARITY, UART2_COM_REG_ADDR, UART2_DATA_REG_ADDR,
+		NO_DIVISION_RATIO, CHANNEL_2_INTR_NUM,
+		CHANNEL_2_INTR_NUM, TX_ENABLE_DISABLE_BIT,
+		INTR_CTRL_REG_OFFSET, CHANNEL_2_RX_BUF_SIZE,
+		CHANNEL_2_TX_BUF_SIZE, CHANNEL_2_BUF_LOW_LIM,
+		CHANNEL_2_BUF_UPPER_LIM, CHANNEL_2_MBX_Q_SIZE,
+		CHANNEL_2_MBX_MESS_SIZE, ONE_8259, MASTER_8259_ADDR, SLAVE_8259_ADDR,
+		ch_1_rx, ch_1_tx, NULL, NULL, PRIORITY_2, PRIORITY_2, NOXONXOFF) == FALSE) {
+		return (FALSE);
+	} /* if */
+	else {
+		/* unmask the interrupt for the COM2 interrupt */
+		/* see notes at top of file */
+		outportb (0x0021, inportb(0x0021) & ~(1<<(CHANNEL_2_INTR_NUM-8)));
+		return (TRUE);
+	} /* else */
+
+} /* end of fintSerialChannelInitialise */

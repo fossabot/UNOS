@@ -1,0 +1,88 @@
+# include <stdio.h>
+# define step 0.2;
+
+int counter,select_axis,diraz,direl;
+float power,az;
+
+void move_az(float step,int diraz,float az,float power);
+{
+	float delta,smpl2,smpl1,st;
+
+	if (diraz=1)               /* -step if diraz =1 (=west) */
+			st=-step;
+	else
+		st=step;
+
+	delta=0;
+
+	while (delta>=0){         /*increases az until power decreases*/
+
+		smpl1=power;
+		az=az+st;
+		smpl2=power;
+		delta=smpl2-smpl1;
+	}
+
+	if (diraz=1)             /* reverse gear for the next azimuth motion */
+		diraz=0;
+	else
+		diraz=1;
+
+ }
+
+ void move_el(float step,int direl,float el,float power);
+{
+	float delta,smpl2,smpl1,st;
+
+	if (direl=1)               /* -step if direl =1 (=down) */
+			st=-step;
+	else
+		st=step;
+
+	delta=0;
+
+	while (delta>=0){         /*increases el until power decreases*/
+
+		smpl1=power;
+		el=el+st;
+		smpl2=power;
+		delta=smpl2-smpl1;
+	}
+
+	if (direl=1)             /* reverse gear for the next elevation motion */
+		direl=0;
+	else
+		direl=1;
+
+ }
+
+ void which_axis(int select_axis,int diraz,int direl,float power,float az,
+					float el,float step)
+					{
+	if select_axis=1
+		move_az(step,diraz,az,power);
+
+	else move_el(step,direl,el,power);
+ }
+
+ main()
+ {
+	counter=0;
+	select_axis=getchar();  /* 1 for az, 0 for el. Selects the axis for the */
+							/* first motion */
+
+	diraz=getchar();    /* initial az motion: 1 for west, 0 for east*/
+	direl=getchar();	/*  initial el motion: 1 for down, 0 for up*/
+
+
+
+	for(counter=0;counter=7;counter++){
+		which_axis(select_axis,diraz,direl,power,az,el,step);
+
+		if (select_axis=1)
+			select_axis=0;
+		else
+			select_axis=1;
+
+	}
+ }
